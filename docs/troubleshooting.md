@@ -85,18 +85,35 @@ A file you intentionally diverged is being flagged. Mark it:
 
 ## Backup / restore
 
-### Restoring after data loss
+### Backup failing / `lemon backup-status` shows DEGRADED
 ```bash
-ls {{USER_HOME}}/backups/                          # find most recent snapshot
-# For Postgres:
-cd {{USER_HOME}}/docker/postgres-shared
-docker compose exec postgres pg_restore -U postgres -d <db> < /backups/<dump>.dump
-# For OpenBao:
-docker compose -f {{USER_HOME}}/docker/openbao/docker-compose.yml down
-cp {{USER_HOME}}/backups/openbao/latest.snap {{USER_HOME}}/docker/openbao/data/raft/
-docker compose up -d
-{{USER_HOME}}/docker/openbao/unseal.sh
+tail -60 {{USER_HOME}}/backup.log
 ```
+Common causes:
+- **`WARNING: hook <name> failed (continuing)`** — that data source's dump
+  failed but the snapshot still ran. Run the hook by hand to see why:
+  `DUMP_DIR=$(mktemp -d) bash ~/backup.d/<name>.sh`
+- **Sealed OpenBao** — the openbao hook soft-skips, but the last Raft
+  snapshot in the backup is then stale. Unseal (`docker/openbao/unseal.sh`).
+- **Expired object-storage credentials** — restic fails outright; rotate the
+  keys and update `~/.restic-env`.
+- **`repository is already locked`** — an earlier run was interrupted:
+  `source ~/.restic-env && restic unlock`.
+
+### Restoring after data loss
+Use the guided script — it stages by default and confirms before anything
+destructive (full runbook: [backup-restore.md](./backup-restore.md)):
+```bash
+{{USER_HOME}}/restore.sh list                       # pick a snapshot
+{{USER_HOME}}/restore.sh files latest <path>        # file/dir → staging dir
+{{USER_HOME}}/restore.sh db <name>                  # DB → <name>_restoretest scratch
+{{USER_HOME}}/restore.sh db <name> --in-place       # DB → live (typed confirm)
+{{USER_HOME}}/restore.sh openbao                    # stage raft .snap + steps
+```
+
+### Restore says "no dump found for `<name>`"
+The DB was provisioned after that snapshot was taken. Check what the snapshot
+actually contains: `source ~/.restic-env && restic ls <snap> | grep pg-shared`.
 
 ## Getting unstuck
 

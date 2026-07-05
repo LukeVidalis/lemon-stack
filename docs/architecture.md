@@ -107,3 +107,25 @@ If OpenBao is not installed:
 
 - Each app reads `~/docker/<app>/secrets.env` (mode 600) directly via the same
   fallback path in `deploy.sh`. Simpler, but no rotation history.
+
+## Backup & restore
+
+The optional `backup` component (add `backup` to `COMPONENTS`) installs a
+restic-based nightly backup with pluggable dump hooks:
+
+- `~/backup.sh` — generic engine: runs every executable `~/backup.d/*.sh`
+  hook (each dumps into a temp `$DUMP_DIR`), then `restic backup`s the path
+  list in `~/.config/lemon/backup-paths.txt` plus the dumps, then applies
+  retention (7 daily / 4 weekly / 6 monthly, overridable).
+- `~/backup.d/` — hooks ship for postgres-shared (globals + every DB), n8n
+  (SQLite), and OpenBao (Raft snapshot). Host-only apps add their own hooks
+  here without touching the engine.
+- `~/.restic-env` (mode 600) — repository + credentials. Any restic backend
+  works: S3/R2, sftp, a local disk.
+- `~/restore.sh` — guided restore: files/dirs to a staging directory,
+  postgres-shared DBs into a scratch `<name>_restoretest` (or `--in-place`
+  with typed confirmation), OpenBao snapshot staging.
+- Cron: backup daily 03:00, `restic check` monthly. `lemon backup-status`
+  and the `daily-backup-digest` n8n workflow report on it.
+
+Full guide + disaster-recovery runbook: [backup-restore.md](./backup-restore.md).

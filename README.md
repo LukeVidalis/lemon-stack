@@ -53,6 +53,7 @@ You can wire it up by adding `claude-runner` (and optionally `obsidian`) to `COM
 | n8n | ⬜ | Workflow automation, can call any internal app over `lemon-internal` |
 | claude-runner | ⬜ | Host systemd service that runs the `server-maintainer` agent on a schedule + handles Plane-driven Claude/Copilot tasks |
 | Obsidian | ⬜ | Self-hosted notes vault; the agent writes daily maintenance notes here |
+| Backup (restic) | ⬜ | Daily restic backups (any backend), pluggable dump hooks, guided restore |
 
 ---
 
@@ -176,7 +177,7 @@ You don't need Claude Code to use lemon-stack — the skills are also readable a
 
 ## Maintenance
 
-- **Backups:** bring your own for now — the reference setup dumps `~/docker/`, `~/deploy/`, `/etc/caddy/Caddyfile`, every database in `postgres-shared`, and OpenBao Raft snapshots via Restic to Cloudflare R2. A ready-made `backup.sh` template is on the roadmap.
+- **Backups:** add `backup` to `COMPONENTS` — daily restic snapshots of `~/docker/`, `~/deploy/`, the Caddyfile, every database in `postgres-shared`, and OpenBao Raft snapshots, to any restic backend (R2/S3, sftp, local disk), with a guided `restore.sh` and a disaster-recovery runbook. See [docs/backup-restore.md](./docs/backup-restore.md).
 - **Upgrades:** `cd ~/lemon-stack && git pull` then run the `/drift-check-upstream` skill to reconcile upstream changes with your local customisations (see [docs/upgrading.md](./docs/upgrading.md)).
 - **Re-running `setup.sh`:** safe — it's idempotent. Re-run after changing components in `setup/parameters.env`.
 
