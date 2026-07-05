@@ -51,6 +51,14 @@ jobs:
           done
           exit $fail
 
+      - name: Backup component tests
+        run: |
+          fail=0
+          for t in infra/backup/tests/*-test.sh; do
+            bash "$t" || fail=1
+          done
+          exit $fail
+
       - name: Cleanup identifiers
         if: always()
         run: rm -f scripts/identifiers.env

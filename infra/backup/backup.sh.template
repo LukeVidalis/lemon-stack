@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# lemon-stack backup engine — restic + pluggable dump hooks.
+#
+# Flow: run every executable ~/backup.d/*.sh (each writes dumps into
+# $DUMP_DIR), then restic-backup the configured path list + $DUMP_DIR,
+# then apply retention. Log format is parsed by `lemon backup-status`
+# and the n8n backup digest — keep the === markers and [ts] prefix.
+#
+# Usage: backup.sh            daily backup run
+#        backup.sh --verify   restic check --read-data-subset (monthly cron)
+#
+# Config:
+#   ~/.restic-env                       repo + credentials (mode 600)
+#   ~/.config/lemon/backup-paths.txt    one path per line
+#   ~/.config/lemon/backup-excludes.txt one exclude pattern per line
+#   ~/backup.d/*.sh                     dump hooks (see docs/backup-restore.md)
+set -euo pipefail
+
+RESTIC_ENV="${RESTIC_ENV:-$HOME/.restic-env}"
+HOOKS_DIR="${HOOKS_DIR:-$HOME/backup.d}"
+CONF_DIR="${CONF_DIR:-$HOME/.config/lemon}"
+PATHS_FILE="$CONF_DIR/backup-paths.txt"
+EXCLUDES_FILE="$CONF_DIR/backup-excludes.txt"
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+tg_notify() {
+    local level="$1" title="$2" message="$3" channel="${4:-backups}"
+    local secret_file="$HOME/docker/tg-notify/secrets.env"
+    [[ ! -r "$secret_file" ]] && return 0
+    local secret
+    secret=$(grep '^API_SECRET=' "$secret_file" | cut -d= -f2-)
+    [[ -z "$secret" ]] && return 0
+    curl -sf -X POST http://127.0.0.1:10020/send \
+        -H "Authorization: Bearer $secret" \
+        -H "Content-Type: application/json" \
+        -d "{\"level\":\"$level\",\"title\":\"$title\",\"message\":\"$message\",\"channel\":\"$channel\"}" \
+        > /dev/null 2>&1 || true
+}
+
+if [[ ! -f "$RESTIC_ENV" ]]; then
+    log "FATAL: $RESTIC_ENV not found — run setup/install-backup.sh first."
+    exit 1
+fi
+# shellcheck disable=SC1090
+source "$RESTIC_ENV"
+
+if [[ "${1:-}" == "--verify" ]]; then
+    log "=== Verify started ==="
+    restic check --read-data-subset="${VERIFY_SUBSET:-2%}"
+    log "=== Verify complete ==="
+    exit 0
+fi
+
+if [[ ! -f "$PATHS_FILE" ]]; then
+    log "FATAL: $PATHS_FILE not found — run setup/install-backup.sh first."
+    exit 1
+fi
+
+trap 'tg_notify "error" "Backup failed" "Check ~/backup.log on $(hostname)."' ERR
+DUMP_DIR=$(mktemp -d /tmp/restic-dump-XXXXXX)
+trap 'rm -rf "$DUMP_DIR"' EXIT
+export DUMP_DIR
+
+log "=== Backup started ==="
+
+# ── Dump hooks ───────────────────────────────────────────────────────────────
+if [[ -d "$HOOKS_DIR" ]]; then
+    for hook in "$HOOKS_DIR"/*.sh; do
+        [[ -x "$hook" ]] || continue
+        name=$(basename "$hook")
+        log "hook: $name"
+        if ! "$hook"; then
+            log "WARNING: hook $name failed (continuing)"
+        fi
+    done
+fi
+
+# ── Restic backup ────────────────────────────────────────────────────────────
+log "Running restic backup..."
+EXCLUDE_ARGS=()
+[[ -f "$EXCLUDES_FILE" ]] && EXCLUDE_ARGS=(--exclude-file "$EXCLUDES_FILE")
+# Exit code 3 = some files unreadable — snapshot still saved, treat as OK.
+restic backup --files-from "$PATHS_FILE" "${EXCLUDE_ARGS[@]}" "$DUMP_DIR" || {
+    rc=$?
+    if [[ $rc -eq 3 ]]; then
+        log "restic: some files unreadable (exit 3), snapshot saved"
+    else
+        exit $rc
+    fi
+}
+
+# ── Retention ────────────────────────────────────────────────────────────────
+log "Pruning old snapshots..."
+restic forget \
+    --keep-daily "${KEEP_DAILY:-7}" \
+    --keep-weekly "${KEEP_WEEKLY:-4}" \
+    --keep-monthly "${KEEP_MONTHLY:-6}" \
+    --prune
+
+log "=== Backup complete ==="
+tg_notify "success" "Backup complete" "Daily restic snapshot succeeded."

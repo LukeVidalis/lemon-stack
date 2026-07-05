@@ -32,15 +32,18 @@ logic and host-personal paths. The portable design separates them:
 ~/.config/lemon/backup-paths.txt   # what restic backs up (one path per line)
 ~/.config/lemon/backup-excludes.txt
 ~/backup.d/                        # dump hooks, run in lexical order
-  50-postgres-shared.sh            # portable — ships with infra/postgres-shared
-  55-n8n-sqlite.sh                 # portable — ships with infra/n8n
-  60-openbao-snapshot.sh           # portable — ships with infra/openbao
+  50-postgres-shared.sh            # portable — ships in infra/backup/hooks/
+  55-n8n-sqlite.sh                 # portable — ships in infra/backup/hooks/
+  60-openbao-snapshot.sh           # portable — ships in infra/backup/hooks/
   7x-*.sh                          # host-only hooks, never promoted upstream
 ```
 
-Repo homes: engine + restore + default config in `infra/backup/`; each hook in
-its component's `infra/<component>/backup-hook.sh`; installer at
-`setup/install-backup.sh`.
+Repo homes: engine + restore + default config in `infra/backup/`; all portable
+hooks in `infra/backup/hooks/NN-<name>.sh`, installed per enabled component by
+the installer at `setup/install-backup.sh`. (Amended from the original
+per-component `infra/<component>/backup-hook.sh` placement: a single hooks
+directory needs one promote-mapping branch — `~/backup.d/* →
+infra/backup/hooks/*` — instead of a per-component lookup table.)
 
 ### 1. Backup engine (`backup.sh`)
 
@@ -84,9 +87,11 @@ Shipped hooks:
 - **openbao** — calls the component's existing `snapshot.sh` (Raft snapshot);
   soft-skips when Bao is down or sealed.
 
-Host-only dumps (apps a given host runs that lemon-stack does not ship) are
-additional `backup.d/` scripts kept out of the upstream repo. This is the
-portability seam: new apps extend backups without touching the engine.
+Each portable hook is installed from `infra/backup/hooks/` only when its
+component is enabled (postgres-shared always — it is mandatory). Host-only
+dumps (apps a given host runs that lemon-stack does not ship) are additional
+`backup.d/` scripts kept out of the upstream repo. This is the portability
+seam: new apps extend backups without touching the engine.
 
 ### 3. Guided restore (`restore.sh`)
 
@@ -118,8 +123,8 @@ sequence: globals → per-DB → files → OpenBao) lives in
   - writes `~/.restic-env` mode 600;
   - runs `restic init` if the repository is empty;
   - installs the engine, restore script, default
-    `backup-paths.txt`/`backup-excludes.txt`, and the `backup-hook.sh` of
-    every enabled component into `~/backup.d/`;
+    `backup-paths.txt`/`backup-excludes.txt`, and the `infra/backup/hooks/`
+    hook of every enabled component into `~/backup.d/`;
   - installs cron: daily backup at 03:00, monthly `--verify`;
   - offers an immediate first run.
 - `verify-install.sh` gains checks: backup cron entry present, `.restic-env`
