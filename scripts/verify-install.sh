@@ -156,6 +156,23 @@ fi
 
 # ── 8. Backup freshness (last finished within 25h) ───────────────────────────
 hdr "Backup freshness"
+if [[ -f "$HOME/backup.sh" ]]; then
+  if crontab -l 2>/dev/null | grep -q "$HOME/backup.sh"; then
+    pass "backup cron entry present"
+  else
+    fail "backup.sh installed but no cron entry"
+  fi
+  if [[ -f "$HOME/.restic-env" ]]; then
+    perms=$(stat -c '%a' "$HOME/.restic-env")
+    if [[ "$perms" == "600" ]]; then
+      pass ".restic-env exists with mode 600"
+    else
+      fail ".restic-env has mode $perms (want 600)"
+    fi
+  else
+    fail "backup.sh installed but ~/.restic-env missing"
+  fi
+fi
 BACKUP_LOG="${HOME}/backup.log"
 if [[ -f $BACKUP_LOG ]]; then
   # Look for the most recent line containing 'finished' or 'snapshot' as a heuristic.

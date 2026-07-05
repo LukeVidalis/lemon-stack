@@ -73,6 +73,11 @@ bash setup/install-deploy.sh
 step "5/6  Install lemon CLI + Claude skills + agent memory"
 bash setup/install-cli.sh
 bash setup/install-bin.sh
+# setup.sh doesn't source parameters.env (each installer does) — read COMPONENTS
+# from the file to decide whether the backup component was ticked.
+if grep -E '^COMPONENTS=' setup/parameters.env 2>/dev/null | grep -q 'backup'; then
+  bash setup/install-backup.sh
+fi
 bash setup/install-skills.sh
 bash setup/install-memory.sh
 

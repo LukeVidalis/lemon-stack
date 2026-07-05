@@ -13,6 +13,9 @@
 #   ~/.claude/agents/<name>.md           → claude/agents/<name>.md
 #   ~/deploy/<file>                      → deploy/<file>.template
 #   ~/bin/<file>                         → bin/<file>.template
+#   ~/backup.sh                          → infra/backup/backup.sh.template
+#   ~/restore.sh                         → infra/backup/restore.sh.template
+#   ~/backup.d/<hook>                    → infra/backup/hooks/<hook>.template
 #   ~/claude-runner/<rel>                → apps/claude-runner/<rel>   (already-templated, no .template suffix)
 #   ~/docker/<svc>/docker-compose.yml    → infra/<svc>/docker-compose.yml.template
 #   ~/docker/<svc>/Caddyfile.fragment    → infra/<svc>/Caddyfile.fragment.template
@@ -76,6 +79,13 @@ resolve_target() {
   elif [[ $p == "$HOME/bin/"* ]]; then
     rel="${p#$HOME/bin/}"
     target="bin/$rel"
+  elif [[ $p == "$HOME/backup.sh" ]]; then
+    target="infra/backup/backup.sh"
+  elif [[ $p == "$HOME/restore.sh" ]]; then
+    target="infra/backup/restore.sh"
+  elif [[ $p == "$HOME/backup.d/"* ]]; then
+    rel="${p#$HOME/backup.d/}"
+    target="infra/backup/hooks/$rel"
   elif [[ $p == "$HOME/claude-runner/"* ]]; then
     rel="${p#$HOME/claude-runner/}"
     # claude-runner ships under apps/claude-runner/ in the repo. Files are
