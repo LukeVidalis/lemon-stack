@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# backup.d hook: take a fresh OpenBao Raft snapshot so the latest secrets
+# state lands in tonight's restic snapshot. Delegates to the component's
+# snapshot.sh (which handles sealed state itself). Soft-skips if Bao is down.
+# The snapshot file is written under ~/docker/openbao/ and picked up by the
+# restic path list — nothing is written to $DUMP_DIR directly.
+set -euo pipefail
+
+if ! docker ps --filter name=openbao --format '{{.Names}}' | grep -q '^openbao$'; then
+    echo "openbao: container not running, skipping"
+    exit 0
+fi
+
+"$HOME/docker/openbao/snapshot.sh"
+echo "openbao snapshot: OK"

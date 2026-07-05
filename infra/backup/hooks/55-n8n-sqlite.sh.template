@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# backup.d hook: copy n8n's live SQLite DB out of its named volume via a
+# throwaway Alpine container. Soft-skips if n8n is down.
+# Contract: reads $DUMP_DIR, writes n8n.sqlite.
+set -euo pipefail
+: "${DUMP_DIR:?DUMP_DIR not set — run via backup.sh}"
+
+if ! docker ps --filter name=n8n --format '{{.Names}}' | grep -q '^n8n$'; then
+    echo "n8n: container not running, skipping"
+    exit 0
+fi
+
+docker run --rm \
+    --volumes-from n8n \
+    -v "$DUMP_DIR:/dump" \
+    alpine cp /home/node/.n8n/database.sqlite /dump/n8n.sqlite
+echo "n8n: OK"

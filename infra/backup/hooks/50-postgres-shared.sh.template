@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# backup.d hook: dump postgres-shared — roles/globals + every non-template DB.
+# Auto-includes newly provisioned DBs. Soft-skips if the container is down.
+# Contract: reads $DUMP_DIR, writes pg-shared-globals.sql + pg-shared-<db>.dump.
+set -euo pipefail
+: "${DUMP_DIR:?DUMP_DIR not set — run via backup.sh}"
+
+if ! docker ps --filter name=postgres-shared --format '{{.Names}}' | grep -q '^postgres-shared$'; then
+    echo "postgres-shared: container not running, skipping"
+    exit 0
+fi
+
+docker exec postgres-shared pg_dumpall -U postgres --globals-only \
+    > "$DUMP_DIR/pg-shared-globals.sql"
+
+docker exec postgres-shared psql -U postgres -tAc \
+    "SELECT datname FROM pg_database WHERE datistemplate=false AND datname<>'postgres'" \
+| while read -r db; do
+    [[ -z "$db" ]] && continue
+    docker exec postgres-shared pg_dump -U postgres -Fc "$db" \
+        > "$DUMP_DIR/pg-shared-$db.dump"
+    echo "pg-shared $db: OK"
+done
