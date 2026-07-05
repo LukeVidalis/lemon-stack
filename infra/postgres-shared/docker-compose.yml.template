@@ -1,0 +1,38 @@
+services:
+  postgres-shared:
+    image: postgres:17-alpine
+    container_name: postgres-shared
+    restart: unless-stopped
+    networks: [lemon-internal]
+    volumes:
+      - postgres-shared-data:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d:ro
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_root
+      POSTGRES_DB: postgres
+    secrets:
+      - postgres_root
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+      loki.project: postgres-shared
+      loki.environment: production
+
+secrets:
+  postgres_root:
+    file: ./secrets/postgres_root
+
+networks:
+  lemon-internal:
+    external: true
+
+volumes:
+  postgres-shared-data:

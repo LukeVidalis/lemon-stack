@@ -1,0 +1,36 @@
+# Authentik blueprint: Caddy forward-auth outpost provider.
+# Creates the proxy provider + application + outpost that the (authentik) Caddy
+# snippet talks to.
+# Reference: https://docs.goauthentik.io/docs/add-secure-apps/providers/proxy/
+
+version: 1
+metadata:
+  name: lemon-stack Caddy forward-auth outpost
+entries:
+  - model: authentik_providers_proxy.proxyprovider
+    identifiers:
+      name: caddy-forward-auth
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      mode: forward_domain
+      external_host: https://outpost.{{DOMAIN}}
+      cookie_domain: {{DOMAIN}}
+
+  - model: authentik_core.application
+    identifiers:
+      slug: caddy-forward-auth
+    attrs:
+      name: Caddy (domain-wide SSO)
+      provider: !KeyOf caddy-forward-auth
+
+  - model: authentik_outposts.outpost
+    identifiers:
+      name: caddy-embedded
+    attrs:
+      type: proxy
+      providers:
+        - !KeyOf caddy-forward-auth
+      config:
+        authentik_host: https://auth.{{DOMAIN}}
+        log_level: info
+        object_naming_template: ak-outpost-%(name)s

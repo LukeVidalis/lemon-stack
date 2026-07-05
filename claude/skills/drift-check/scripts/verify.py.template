@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""
+Verify a list of claims against current system state.
+Reads JSON list of claims from stdin, writes drift report (JSON) to stdout.
+
+Each claim is checked once, deterministically. Results are cached per-run to
+avoid duplicate shell calls (e.g. one `docker ps` covers all container claims).
+
+Output: list of {claim, status, actual} where status in {ok, fail, unknown}.
+Only fails and unknowns matter — caller filters oks.
+"""
+import json, os, re, subprocess, sys
+
+claims = json.load(sys.stdin)
+
+# ---- Cached system snapshots (one shell call per category) ----
+def sh(cmd, sudo=False):
+    try:
+        full = ("sudo " + cmd) if sudo else cmd
+        r = subprocess.run(full, shell=True, capture_output=True, text=True, timeout=15)
+        return r.stdout
+    except Exception as e:
+        return ""
+
+CONTAINERS_RUNNING = set(sh("docker ps --format '{{.Names}}'").split())
+PORTS_LISTENING = set()
+for line in sh("ss -tln").splitlines():
+    m = re.search(r':(\d+)\s', line)
+    if m:
+        PORTS_LISTENING.add(m.group(1))
+CADDYFILE = sh("cat /etc/caddy/Caddyfile", sudo=True)
+SYSTEMD_UNITS = sh("systemctl list-unit-files --type=service --no-legend --no-pager")
+SKILLS_DIR = os.path.expanduser("~/.claude/skills")
+SKILLS_AVAILABLE = set(os.listdir(SKILLS_DIR)) if os.path.isdir(SKILLS_DIR) else set()
+
+VAULT_DIR = "/var/lib/docker/volumes/obsidian_obsidian_config/_data/obsidian/Lemon-vault"
+VAULT_FILES = set(sh(f"ls {VAULT_DIR}", sudo=True).split())
+
+results = []
+
+def expand(p):
+    return os.path.expanduser(p)
+
+def path_exists(p):
+    p_abs = expand(p)
+    # Most user paths are readable; some (e.g. /home/homeassistant) need sudo
+    if os.path.exists(p_abs):
+        return True
+    r = subprocess.run(["sudo", "test", "-e", p_abs])
+    return r.returncode == 0
+
+def command_exists(cmd):
+    return subprocess.run(["bash", "-lc", f"command -v {cmd}"],
+                          capture_output=True).returncode == 0
+
+for c in claims:
+    typ, val = c["type"], c["value"]
+    status, actual = "ok", None
+
+    if typ == "path":
+        if not path_exists(val):
+            status, actual = "fail", "path not found"
+
+    elif typ == "container":
+        if val not in CONTAINERS_RUNNING:
+            # Allow underscore/hyphen swap and prefix matches (e.g. "authentik"
+            # matches "authentik-server", "authentik-worker")
+            alt = {val.replace("-", "_"), val.replace("_", "-")}
+            prefix_match = any(
+                c == val or c.startswith(val + "-") or c.startswith(val + "_")
+                for c in CONTAINERS_RUNNING
+            )
+            if not (alt & CONTAINERS_RUNNING) and not prefix_match:
+                status, actual = "fail", "container not running"
+
+    elif typ == "port":
+        if val not in PORTS_LISTENING:
+            status, actual = "fail", "port not listening"
+
+    elif typ == "subdomain":
+        host = val
+        # Caddy block is `host.{{DOMAIN}} {` or referenced in import
+        if host not in CADDYFILE:
+            status, actual = "fail", "no Caddy block"
+
+    elif typ == "command":
+        if not command_exists(val):
+            status, actual = "fail", "command missing"
+
+    elif typ == "service":
+        if val not in SYSTEMD_UNITS:
+            status, actual = "fail", "service not registered"
+
+    elif typ == "skill":
+        if val not in SKILLS_AVAILABLE:
+            status, actual = "fail", "skill not installed"
+
+    elif typ == "vault":
+        if val not in VAULT_FILES:
+            status, actual = "fail", "vault file missing"
+
+    else:
+        status = "unknown"
+
+    if status != "ok":
+        results.append({**c, "status": status, "actual": actual})
+
+print(json.dumps(results, indent=2))

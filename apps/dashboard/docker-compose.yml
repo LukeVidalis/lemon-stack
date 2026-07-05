@@ -1,0 +1,38 @@
+services:
+  api:
+    build: ./api
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - {{USER_HOME}}/deploy/ports.json:/app/ports.json:ro
+      - dashboard-data:/data
+    environment:
+      INTERNAL_SUMMARY_SECRET: ${INTERNAL_SUMMARY_SECRET}
+      ASPNETCORE_URLS: http://+:${API_PORT:-8080}
+    labels:
+      loki.project: dashboard
+      loki.environment: production
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:${API_PORT:-8080}/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  web:
+    build: ./web
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8081}:80"
+    labels:
+      loki.project: dashboard
+      loki.environment: production
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  dashboard-data:

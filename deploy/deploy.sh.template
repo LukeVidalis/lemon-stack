@@ -1,0 +1,815 @@
+#!/usr/bin/env bash
+#
+# deploy.sh — Zero-friction deployment for lemon-server
+#
+# Called by GitHub Actions self-hosted runner after tests pass.
+# Supports two modes:
+#   - Single-service: repo has Dockerfile → one image, one container, one port
+#   - Multi-service:  repo has docker-compose.yml → multiple images, per-service ports
+# Auto-configures Caddy reverse proxy and reloads.
+#
+# Usage:
+#   deploy.sh <repo-name> <workspace-path> [--remove] [--image <ref>]
+#
+# --image <ref> (or $DEPLOY_PREBUILT_IMAGE) deploys a prebuilt image from a
+# registry instead of building locally — single-service repos only. The runner
+# must already be authenticated to the source registry (the pull fails loudly
+# otherwise; it never silently falls back to a build).
+#
+# The repo name becomes the subdomain: <repo-name>.{{DOMAIN}}
+# Override with deploy.conf in the repo root.
+#
+# Port assignment is automatic — tracked in {{USER_HOME}}/deploy/ports.json
+#
+set -euo pipefail
+
+DEPLOY_DIR="{{USER_HOME}}/deploy"
+
+# --- Notifications ---
+# First line of the commit message, truncated to 120 chars
+COMMIT_MSG="$(echo "${DEPLOY_COMMIT_MSG:-}" | head -1 | cut -c1-120)"
+
+tg_notify() {
+    local level="$1" title="$2" message="$3" channel="${4:-}"
+    local secret_file="{{USER_HOME}}/docker/tg-notify/secrets.env"
+    [[ ! -f "$secret_file" ]] && return 0
+    local secret
+    secret=$(grep '^API_SECRET=' "$secret_file" | cut -d= -f2-)
+    [[ -z "$secret" ]] && return 0
+    local payload
+    payload=$(jq -n \
+        --arg level "$level" \
+        --arg title "$title" \
+        --arg message "$message" \
+        --arg channel "$channel" \
+        'if $channel != "" then {level: $level, title: $title, message: $message, channel: $channel} else {level: $level, title: $title, message: $message} end')
+    curl -sf -X POST http://localhost:10020/send \
+        -H "Authorization: Bearer $secret" \
+        -H "Content-Type: application/json" \
+        -d "$payload" \
+        > /dev/null 2>&1 || true
+}
+
+# Send a Discord embed notification via tg-notify.
+# Args: level title description color footer channel
+# Send a Discord embed notification via tg-notify.
+# Args: level title description color footer channel [buttons_json]
+# buttons_json example: '[{"label":"View logs","action":"get_logs:myapp","style":"secondary"}]'
+tg_notify_embed() {
+    local level="$1" title="$2" description="$3" color="$4" footer="$5" channel="${6:-}" buttons_json="${7:-}"
+    local secret_file="{{USER_HOME}}/docker/tg-notify/secrets.env"
+    [[ ! -f "$secret_file" ]] && return 0
+    local secret
+    secret=$(grep '^API_SECRET=' "$secret_file" | cut -d= -f2-)
+    [[ -z "$secret" ]] && return 0
+    local payload
+    if [[ -n "$buttons_json" ]]; then
+        payload=$(jq -n \
+            --arg level "$level" \
+            --arg title "$title" \
+            --arg description "$description" \
+            --arg color "$color" \
+            --arg footer "$footer" \
+            --arg channel "$channel" \
+            --argjson buttons "$buttons_json" \
+            '{level:$level, channel:$channel, embed:{title:$title, description:$description, color:$color, footer:$footer}, buttons:$buttons}')
+    else
+        payload=$(jq -n \
+            --arg level "$level" \
+            --arg title "$title" \
+            --arg description "$description" \
+            --arg color "$color" \
+            --arg footer "$footer" \
+            --arg channel "$channel" \
+            '{level:$level, channel:$channel, embed:{title:$title, description:$description, color:$color, footer:$footer}}')
+    fi
+    curl -sf -X POST http://localhost:10020/send \
+        -H "Authorization: Bearer $secret" \
+        -H "Content-Type: application/json" \
+        -d "$payload" \
+        > /dev/null 2>&1 || true
+}
+
+DOCKER_DIR="{{USER_HOME}}/docker"
+PORTS_FILE="$DEPLOY_DIR/ports.json"
+CADDYFILE="/etc/caddy/Caddyfile"
+PORT_RANGE_START=10000
+PORT_RANGE_END=10999
+DOMAIN="{{DOMAIN}}"
+
+# --- Helpers ---
+
+log() { echo "[deploy] $*"; }
+die() { echo "[deploy] ERROR: $*" >&2; exit 1; }
+
+# --- Secrets loader ---
+# Prefers OpenBao (via ~/deploy/bao-fetch.sh <repo>); on any failure falls back
+# to ~/docker/<repo>/secrets.env. Writes resolved KEY=value lines to $1 (a tmp
+# file path the caller supplies). Returns the source used as the second word in
+# the path-marker file so logs stay informative.
+load_secrets() {
+    local repo="$1" out_file="$2"
+    : > "$out_file"
+    chmod 600 "$out_file" 2>/dev/null || true
+
+    local bao_fetch="$DEPLOY_DIR/bao-fetch.sh"
+    if [[ -x "$bao_fetch" ]]; then
+        if "$bao_fetch" "$repo" > "$out_file" 2>/dev/null; then
+            log "secrets: loaded from OpenBao ($(wc -l < "$out_file") keys)"
+            return 0
+        fi
+        log "secrets: OpenBao unavailable for $repo, trying file fallback"
+    fi
+
+    local fallback="$DOCKER_DIR/$repo/secrets.env"
+    if [[ -r "$fallback" ]]; then
+        cp "$fallback" "$out_file"
+        chmod 600 "$out_file"
+        log "secrets: loaded from $fallback ($(grep -cE '^[A-Z_][A-Z0-9_]*=' "$out_file" || true) keys)"
+        return 0
+    fi
+
+    log "secrets: none found for $repo (neither OpenBao nor $fallback)"
+    return 0
+}
+
+ensure_ports_file() {
+    if [[ ! -f "$PORTS_FILE" ]]; then
+        echo '{}' > "$PORTS_FILE"
+    fi
+}
+
+next_available_port() {
+    ensure_ports_file
+    local used_ports
+    used_ports=$(python3 -c "
+import json, sys
+with open('$PORTS_FILE') as f:
+    data = json.load(f)
+ports = []
+for v in data.values():
+    if isinstance(v, int):
+        ports.append(v)
+    elif isinstance(v, dict):
+        ports.extend(v.values())
+print(' '.join(str(p) for p in ports))
+")
+    for port in $(seq $PORT_RANGE_START $PORT_RANGE_END); do
+        if ! echo "$used_ports" | grep -qw "$port" && ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+            echo "$port"
+            return
+        fi
+    done
+    die "No available ports in range $PORT_RANGE_START-$PORT_RANGE_END"
+}
+
+get_port() {
+    local project="$1"
+    ensure_ports_file
+    python3 -c "
+import json
+with open('$PORTS_FILE') as f:
+    data = json.load(f)
+print(data.get('$project', ''))
+"
+}
+
+set_port() {
+    local project="$1" port="$2"
+    ensure_ports_file
+    python3 -c "
+import json
+with open('$PORTS_FILE') as f:
+    data = json.load(f)
+data['$project'] = int($port)
+with open('$PORTS_FILE', 'w') as f:
+    json.dump(data, f, indent=2)
+"
+}
+
+remove_port() {
+    local project="$1"
+    ensure_ports_file
+    python3 -c "
+import json
+with open('$PORTS_FILE') as f:
+    data = json.load(f)
+data.pop('$project', None)
+with open('$PORTS_FILE', 'w') as f:
+    json.dump(data, f, indent=2)
+"
+}
+
+# --- Config ---
+
+read_deploy_conf() {
+    local workspace="$1" repo="$2"
+    # Defaults
+    SUBDOMAIN="$repo"
+    CONTAINER_PORT=8080
+    HEALTH_CHECK=""
+    ENV_VARS=()
+    VOLUMES=()
+    AUTH_MODE="sso"   # sso | none — "none" opts out of Authentik forward_auth
+
+    local conf="$workspace/deploy.conf"
+    if [[ -f "$conf" ]]; then
+        log "Reading deploy.conf"
+        while IFS='=' read -r key value; do
+            key=$(echo "$key" | xargs)
+            value=$(echo "$value" | xargs)
+            [[ -z "$key" || "$key" == \#* ]] && continue
+            case "$key" in
+                subdomain) SUBDOMAIN="$value" ;;
+                container_port) CONTAINER_PORT="$value" ;;
+                health_check) HEALTH_CHECK="$value" ;;
+                env) ENV_VARS+=("$value") ;;
+                volume) VOLUMES+=("$value") ;;
+                auth) AUTH_MODE="$value" ;;
+            esac
+        done < "$conf"
+    fi
+}
+
+# --- Caddy ---
+
+caddy_has_entry() {
+    local subdomain="$1"
+    grep -q "http://${subdomain}.${DOMAIN}" "$CADDYFILE" 2>/dev/null
+}
+
+caddy_add_entry() {
+    local subdomain="$1" port="$2"
+    if caddy_has_entry "$subdomain"; then
+        log "Caddy entry for ${subdomain}.${DOMAIN} already exists, updating port"
+        # Update existing port in the reverse_proxy line
+        sudo sed -i "/${subdomain}\.${DOMAIN}/,/}/ s|reverse_proxy localhost:[0-9]*|reverse_proxy localhost:${port}|" "$CADDYFILE"
+    else
+        log "Adding Caddy entry for ${subdomain}.${DOMAIN} -> localhost:${port}"
+        local auth_line=""
+        if [[ "${AUTH_MODE:-sso}" != "none" ]]; then
+            auth_line=$'\timport authentik\n'
+        fi
+        # Append new block before EOF
+        printf '\nhttp://%s.%s {\n%s\treverse_proxy localhost:%s\n}\n' \
+            "$subdomain" "$DOMAIN" "$auth_line" "$port" | sudo tee -a "$CADDYFILE" > /dev/null
+    fi
+    sudo systemctl reload caddy
+    log "Caddy reloaded"
+}
+
+caddy_remove_entry() {
+    local subdomain="$1"
+    if caddy_has_entry "$subdomain"; then
+        log "Removing Caddy entry for ${subdomain}.${DOMAIN}"
+        sudo sed -i "/http:\/\/${subdomain}\.${DOMAIN}/,/^}/d" "$CADDYFILE"
+        sudo systemctl reload caddy
+        log "Caddy reloaded"
+    fi
+}
+
+sync_authentik_projects() {
+    if [[ "${AUTH_MODE:-sso}" == "none" ]]; then
+        return
+    fi
+
+    if ! docker inspect admin-ui-api-1 >/dev/null 2>&1; then
+        log "WARNING: admin-ui-api-1 is unavailable; skipping Authentik project sync"
+        return
+    fi
+
+    log "Syncing Authentik project providers"
+    docker exec admin-ui-api-1 sh -lc \
+        "cd /app && node --input-type=module -e \"import('./src/setup.js').then(m=>m.ensureProjectInfrastructure()).then(()=>process.exit(0)).catch(err=>{console.error(err);process.exit(1)})\""
+}
+
+# --- Docker ---
+
+build_and_deploy() {
+    local repo="$1" workspace="$2" host_port="$3" prebuilt_image="${4:-}"
+    local project_dir="$DOCKER_DIR/$repo"
+    local image_name="lemon/$repo:latest"
+
+    if [[ -n "$prebuilt_image" ]]; then
+        # Reuse an image that was already built+pushed upstream (e.g. by CI) and
+        # deploy it as-is — no local build. The runner must already be
+        # authenticated to the source registry; fail loudly rather than silently
+        # falling back to a build (which would mask a misconfigured pipeline).
+        log "Using prebuilt image: $prebuilt_image (skipping build)"
+        docker pull "$prebuilt_image" \
+            || die "Failed to pull prebuilt image '$prebuilt_image' — ensure the runner is authenticated to the registry"
+        docker tag "$prebuilt_image" "$image_name"
+    else
+        # Build image
+        log "Building Docker image: $image_name"
+        # Pass GitHub Packages auth as a BuildKit secret when available, so
+        # Dockerfiles can `RUN --mount=type=secret,id=github_packages_token` to
+        # install private @{{GITHUB_ORG}}/* packages from GitHub Packages.
+        # Token lives at $GITHUB_PACKAGES_TOKEN_FILE (default ~/.github-packages-token, mode 600).
+        local gh_token_file="${GITHUB_PACKAGES_TOKEN_FILE:-{{USER_HOME}}/.github-packages-token}"
+        if [[ -f "$gh_token_file" ]]; then
+            DOCKER_BUILDKIT=1 docker build \
+                --secret "id=github_packages_token,src=$gh_token_file" \
+                -t "$image_name" "$workspace"
+        else
+            docker build -t "$image_name" "$workspace"
+        fi
+    fi
+
+    # Create project dir
+    mkdir -p "$project_dir"
+
+    # Write docker-compose.yml
+    local env_block=""
+    # Include env vars from deploy.conf
+    for var in "${ENV_VARS[@]+"${ENV_VARS[@]}"}"; do
+        env_block="${env_block}      - ${var}\n"
+    done
+    # Include vars from OpenBao (preferred) or secrets.env (fallback), escaping
+    # $ as $$ to prevent docker-compose interpolation.
+    local secrets_tmp
+    secrets_tmp="$(mktemp)"
+    trap "rm -f '$secrets_tmp'" RETURN
+    load_secrets "$repo" "$secrets_tmp"
+    if [[ -s "$secrets_tmp" ]]; then
+        while IFS='=' read -r key value || [[ -n "$key" ]]; do
+            [[ -z "$key" || "$key" == \#* ]] && continue
+            escaped_value="${value//\$/\$\$}"
+            env_block="${env_block}      - ${key}=${escaped_value}\n"
+        done < "$secrets_tmp"
+    fi
+
+    cat > "$project_dir/docker-compose.yml" <<COMPOSE
+version: '3.8'
+
+services:
+  ${repo}:
+    image: ${image_name}
+    container_name: ${repo}
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${host_port}:${CONTAINER_PORT}"
+    labels:
+      - "loki.project=${repo}"
+      - "loki.environment=production"
+$(if [[ -n "$env_block" ]]; then echo "    environment:"; echo -e "$env_block"; fi)
+$(if [[ ${#VOLUMES[@]} -gt 0 ]]; then echo "    volumes:"; for v in "${VOLUMES[@]}"; do echo "      - ${v}"; done; fi)
+COMPOSE
+
+    # Deploy
+    log "Deploying container: $repo"
+    cd "$project_dir"
+    docker-compose down 2>/dev/null || true
+    docker-compose up -d
+
+    # Health check
+    if [[ -n "$HEALTH_CHECK" ]]; then
+        log "Waiting for health check: $HEALTH_CHECK"
+        local attempts=0
+        while [[ $attempts -lt 30 ]]; do
+            if curl -sf "http://localhost:${host_port}${HEALTH_CHECK}" > /dev/null 2>&1; then
+                log "Health check passed"
+                return 0
+            fi
+            sleep 2
+            ((attempts++))
+        done
+        log "WARNING: Health check did not pass after 60s"
+    fi
+}
+
+remove_project() {
+    local repo="$1"
+    local project_dir="$DOCKER_DIR/$repo"
+
+    if [[ -d "$project_dir" ]]; then
+        log "Stopping containers: $repo"
+        cd "$project_dir"
+        docker compose --project-name "$repo" down 2>/dev/null || true
+        cd /
+        rm -rf "$project_dir"
+    fi
+
+    # Remove images based on project type (single int vs multi dict in ports.json)
+    ensure_ports_file
+    local multi_services
+    multi_services=$(python3 -c "
+import json
+with open('$PORTS_FILE') as f:
+    data = json.load(f)
+entry = data.get('$repo')
+if isinstance(entry, dict):
+    for svc in entry:
+        print(svc)
+" 2>/dev/null)
+
+    if [[ -n "$multi_services" ]]; then
+        for svc in $multi_services; do
+            docker rmi "${repo}-${svc}:latest" 2>/dev/null || true
+        done
+    else
+        docker rmi "lemon/$repo:latest" 2>/dev/null || true
+    fi
+
+    # Remove Caddy entry
+    caddy_remove_entry "$repo"
+
+    # Remove port
+    remove_port "$repo"
+
+    log "Project $repo removed"
+}
+
+# --- Multi-service ---
+
+get_routable_services() {
+    local workspace="$1"
+    local repo="${2:-}"
+    local env_file_flag=""
+    if [[ -n "$repo" && -f "$DOCKER_DIR/$repo/.env" ]]; then
+        env_file_flag="--env-file $DOCKER_DIR/$repo/.env"
+    fi
+    cd "$workspace"
+    docker compose $env_file_flag config --format json 2>/dev/null | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for svc, cfg in data.get('services', {}).items():
+    ports = cfg.get('ports', [])
+    if ports:
+        target = ports[0].get('target', ports[0].get('published', 8080))
+        print(f'{svc}:{target}')
+"
+}
+
+allocate_multi_ports() {
+    local repo="$1"; shift
+    local service_specs=("$@")   # "api:8080" "web:80"
+
+    python3 - "$PORTS_FILE" "$repo" "${service_specs[@]}" <<'PYEOF'
+import json, sys, subprocess
+
+ports_file, repo, *specs = sys.argv[1:]
+
+with open(ports_file) as f:
+    data = json.load(f)
+
+# Collect all used ports (int or dict values)
+used = set()
+for v in data.values():
+    if isinstance(v, int):
+        used.add(v)
+    elif isinstance(v, dict):
+        used.update(v.values())
+
+# Also check live sockets
+result = subprocess.run(['ss', '-tlnp'], capture_output=True, text=True)
+for line in result.stdout.splitlines():
+    for part in line.split():
+        if ':' in part:
+            try:
+                used.add(int(part.split(':')[-1]))
+            except ValueError:
+                pass
+
+# Reuse existing assignments for this project
+existing = data.get(repo, {})
+if not isinstance(existing, dict):
+    existing = {}
+
+port_map = {}
+next_port = 10000
+for spec in specs:
+    svc = spec.split(':')[0]
+    if svc in existing:
+        port_map[svc] = existing[svc]
+    else:
+        while next_port in used or next_port in port_map.values():
+            next_port += 1
+        port_map[svc] = next_port
+        used.add(next_port)
+        next_port += 1
+
+data[repo] = port_map
+with open(ports_file, 'w') as f:
+    json.dump(data, f, indent=2)
+
+# Output for shell to capture
+print(json.dumps(port_map))
+PYEOF
+}
+
+build_and_deploy_multi() {
+    local repo="$1" workspace="$2" ports_json="$3"
+    local project_dir="$DOCKER_DIR/$repo"
+    mkdir -p "$project_dir"
+
+    # Load secrets up-front — needed for both build-time ARGs (e.g. VITE_*) and
+    # runtime env vars. OpenBao preferred; falls back to secrets.env.
+    #
+    # Keep the temp env file out of the shared project dir: concurrent deploys
+    # for the same repo can overlap, and sibling cleanup in a shared directory
+    # can delete another run's env file mid-deploy.
+    local secrets_tmp
+    secrets_tmp="$(mktemp "${TMPDIR:-/tmp}/${repo}.env.runtime.XXXXXX")"
+    chmod 600 "$secrets_tmp"
+    load_secrets "$repo" "$secrets_tmp"
+    local compose_env_args=()
+    if [[ -s "$secrets_tmp" ]]; then
+        compose_env_args=(--env-file "$secrets_tmp")
+    elif [[ -f "$project_dir/.env" ]]; then
+        compose_env_args=(--env-file "$project_dir/.env")
+    fi
+
+    # Build from workspace so relative build: paths resolve correctly
+    log "Building images for $repo"
+    cd "$workspace"
+    docker compose "${compose_env_args[@]}" --project-name "$repo" build
+
+    # Generate runtime compose: image: instead of build:, correct host ports
+    python3 - "$workspace/docker-compose.yml" "$project_dir/docker-compose.yml" \
+              "$repo" "$ports_json" <<'PYEOF'
+import json, sys, yaml
+
+src, dst, repo, ports_json = sys.argv[1:]
+port_map = json.loads(ports_json)
+
+with open(src) as f:
+    compose = yaml.safe_load(f)
+
+for svc_name, svc in compose.get('services', {}).items():
+    if 'build' in svc:
+        del svc['build']
+        svc['image'] = f"{repo}-{svc_name}:latest"
+    if svc_name in port_map and 'ports' in svc:
+        host_port = port_map[svc_name]
+        raw = svc['ports'][0]
+        if isinstance(raw, dict):
+            target = raw.get('target', 8080)
+        else:
+            target = str(raw).split(':')[-1].split('/')[-1]
+        svc['ports'] = [f"127.0.0.1:{host_port}:{target}"]
+    # Add Loki labels for Promtail log discovery
+    existing_labels = svc.get('labels', [])
+    if isinstance(existing_labels, list):
+        existing_labels = {k: v for k, v in (l.split('=', 1) for l in existing_labels if '=' in l)}
+    existing_labels['loki.project'] = repo
+    existing_labels['loki.environment'] = 'production'
+    svc['labels'] = existing_labels
+
+compose.pop('version', None)
+with open(dst, 'w') as f:
+    yaml.dump(compose, f, default_flow_style=False, sort_keys=False)
+PYEOF
+
+    log "Starting containers for $repo"
+    cd "$project_dir"
+    docker compose --project-name "$repo" down 2>/dev/null || true
+    docker compose "${compose_env_args[@]}" --project-name "$repo" up -d
+    rm -f "$secrets_tmp"
+}
+
+caddy_add_multi_entry() {
+    local subdomain="$1" workspace="$2" ports_json="$3"
+    caddy_remove_entry "$subdomain"
+
+    local caddy_body
+    if [[ -f "$workspace/Caddyfile.fragment" ]]; then
+        caddy_body=$(python3 -c "
+import json, sys
+ports = json.loads(sys.argv[1])
+body = open(sys.argv[2]).read()
+for svc, port in ports.items():
+    body = body.replace('{{' + svc.upper() + '_PORT}}', str(port))
+print(body)
+" "$ports_json" "$workspace/Caddyfile.fragment")
+    else
+        # Default: /api/* → api, /* → web (first two services)
+        local api_port web_port
+        api_port=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('api',''))" "$ports_json")
+        web_port=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('web',''))" "$ports_json")
+        if [[ -n "$api_port" && -n "$web_port" ]]; then
+            caddy_body=$(printf '\thandle /api/* {\n\t\treverse_proxy localhost:%s\n\t}\n\thandle {\n\t\treverse_proxy localhost:%s\n\t}' "$api_port" "$web_port")
+        else
+            # Single routable service — use first port
+            local first_port
+            first_port=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(list(d.values())[0])" "$ports_json")
+            caddy_body=$(printf '\treverse_proxy localhost:%s' "$first_port")
+        fi
+    fi
+
+    local auth_line=""
+    if [[ "${AUTH_MODE:-sso}" != "none" ]]; then
+        auth_line=$'\timport authentik\n'
+    fi
+    printf '\nhttp://%s.%s {\n%s%s\n}\n' "$subdomain" "$DOMAIN" "$auth_line" "$caddy_body" \
+        | sudo tee -a "$CADDYFILE" > /dev/null
+    sudo systemctl reload caddy
+    log "Caddy reloaded"
+}
+
+generate_and_commit_claude_md() {
+    local repo="$1" workspace="$2"
+    {{USER_HOME}}/bin/generate-claude-md.sh "$repo" "$workspace" 2>/dev/null || {
+        log "WARNING: generate-claude-md.sh failed for $repo, skipping"
+        return 0
+    }
+    local output_file="$workspace/CLAUDE.md"
+    [[ ! -f "$output_file" ]] && return 0
+    cd "$workspace"
+    git add CLAUDE.md
+    if git diff --cached --quiet; then
+        log "CLAUDE.md unchanged for $repo"
+        return 0
+    fi
+    git commit -m "chore: refresh CLAUDE.md [skip ci]"
+    git push origin HEAD
+    log "CLAUDE.md refreshed and pushed for $repo"
+}
+
+deploy_single() {
+    local repo="$1" workspace="$2" prebuilt_image="${3:-}"
+
+    # Read config
+    read_deploy_conf "$workspace" "$repo"
+
+    # Get or assign port
+    local host_port
+    host_port=$(get_port "$repo")
+    if [[ -z "$host_port" ]]; then
+        host_port=$(next_available_port)
+        set_port "$repo" "$host_port"
+        log "Assigned port $host_port to $repo"
+    else
+        log "Using existing port $host_port for $repo"
+    fi
+
+    # Build and deploy container
+    build_and_deploy "$repo" "$workspace" "$host_port" "$prebuilt_image"
+
+    # Configure Caddy
+    caddy_add_entry "$SUBDOMAIN" "$host_port"
+    sync_authentik_projects
+    generate_and_commit_claude_md "$repo" "$workspace"
+
+    log "Deployed: https://${SUBDOMAIN}.${DOMAIN}"
+    log "Container: $repo on 127.0.0.1:${host_port}"
+    tg_notify_embed "success" "✅ $repo deployed" \
+        "${COMMIT_MSG:-deployed}" \
+        "success" \
+        "https://${SUBDOMAIN}.${DOMAIN}" \
+        "deploys"
+    trigger_drift_check "$repo"
+    trigger_deploy_review "$repo" "$SUBDOMAIN" "$host_port"
+}
+
+deploy_multi() {
+    local repo="$1" workspace="$2"
+
+    log "Detected multi-service project: $repo"
+
+    # Read deploy.conf so AUTH_MODE (and any future shared settings) are honored
+    read_deploy_conf "$workspace" "$repo"
+
+    # Extract routable services (those with ports in compose)
+    local services
+    services=$(get_routable_services "$workspace" "$repo")
+    [[ -z "$services" ]] && die "No services with ports found in $workspace/docker-compose.yml"
+    log "Routable services: $services"
+
+    # Allocate ports for all services atomically
+    local ports_json
+    ports_json=$(allocate_multi_ports "$repo" $services)
+    log "Port allocation: $ports_json"
+
+    # Build images and deploy
+    build_and_deploy_multi "$repo" "$workspace" "$ports_json"
+
+    # Configure Caddy (use SUBDOMAIN from deploy.conf if set, else repo name)
+    local subdomain="${SUBDOMAIN:-$repo}"
+    caddy_add_multi_entry "$subdomain" "$workspace" "$ports_json"
+    sync_authentik_projects
+
+    generate_and_commit_claude_md "$repo" "$workspace"
+
+    log "Deployed: https://${subdomain}.${DOMAIN}"
+    log "Services: $ports_json"
+    tg_notify_embed "success" "✅ $repo deployed" \
+        "${COMMIT_MSG:-deployed}" \
+        "success" \
+        "https://${subdomain}.${DOMAIN}" \
+        "deploys"
+    trigger_drift_check "$repo"
+    # For multi-service, pass first port from ports_json for the review's localhost probe.
+    local first_port
+    first_port=$(echo "$ports_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(next(iter(d.values())) if d else 0)" 2>/dev/null || echo 0)
+    trigger_deploy_review "$repo" "$subdomain" "$first_port"
+}
+
+# --- Main ---
+
+main() {
+    local repo="${1:-}"
+    local workspace="${2:-}"
+
+    [[ -z "$repo" ]] && die "Usage: deploy.sh <repo-name> <workspace-path> [--remove] [--image <ref>]"
+
+    # Optional flags after the two positionals. --image (or $DEPLOY_PREBUILT_IMAGE)
+    # lets a caller deploy a prebuilt image instead of building locally
+    # (single-service repos only). Unknown args are ignored for forward-compat.
+    local prebuilt_image="${DEPLOY_PREBUILT_IMAGE:-}"
+    local remove=0
+    local rest=( "${@:3}" )
+    local i=0
+    while [[ $i -lt ${#rest[@]} ]]; do
+        case "${rest[$i]}" in
+            --remove) remove=1 ;;
+            --image) i=$((i + 1)); prebuilt_image="${rest[$i]:-}" ;;
+            --image=*) prebuilt_image="${rest[$i]#*=}" ;;
+        esac
+        i=$((i + 1))
+    done
+
+    # Serialize deploy/remove operations per repo. GitHub reruns and duplicate
+    # push-triggered deploys can overlap on the same self-hosted runner host;
+    # without a lock they race on compose networks, container names, and other
+    # shared runtime state under ~/docker/<repo>.
+    local lock_dir="$DOCKER_DIR/.deploy-locks"
+    mkdir -p "$lock_dir"
+    local lock_file="$lock_dir/$repo.lock"
+    exec 9>"$lock_file"
+    log "Waiting for deploy lock: $lock_file"
+    flock 9
+    log "Acquired deploy lock: $lock_file"
+
+    if [[ $remove -eq 1 ]]; then
+        remove_project "$repo"
+        exit 0
+    fi
+
+    [[ -z "$workspace" ]] && die "Usage: deploy.sh <repo-name> <workspace-path>"
+    [[ ! -d "$workspace" ]] && die "Workspace not found: $workspace"
+
+    if [[ -f "$workspace/docker-compose.yml" ]]; then
+        # Multi-service path. A single prebuilt image is ambiguous across
+        # multiple services, so it's intentionally unsupported here.
+        [[ -n "$prebuilt_image" ]] && die "--image is not supported for multi-service (docker-compose.yml) projects"
+        deploy_multi "$repo" "$workspace"
+    elif [[ -f "$workspace/Dockerfile" ]]; then
+        # Single-service path
+        deploy_single "$repo" "$workspace" "$prebuilt_image"
+    else
+        die "No Dockerfile or docker-compose.yml found in $workspace"
+    fi
+}
+
+_on_error() {
+    local repo="${1:-unknown}"
+    local buttons_json="[{\"label\":\"View logs\",\"action\":\"get_logs:${repo}\",\"style\":\"secondary\"}]"
+    tg_notify_embed "error" "🚨 $repo deploy failed" \
+        "${COMMIT_MSG:-check runner logs on lemon-server}" \
+        "error" \
+        "Check Actions logs on lemon-server" \
+        "deploys" \
+        "$buttons_json"
+}
+trap '_on_error "${1:-unknown}"' ERR
+
+# Run drift-check scoped to a freshly-deployed repo (non-blocking). Sends a
+# tg-notify only on *new* findings; safe to call even if drift-check is absent.
+trigger_drift_check() {
+    local repo="$1"
+    local scan="$HOME/.claude/skills/drift-check/scripts/scan.sh"
+    [[ -x "$scan" || -f "$scan" ]] || return 0
+    log "Triggering drift-check (scope=$repo, non-blocking)"
+    (
+        nohup bash "$scan" --scope "$repo" --notify-on-drift \
+            >> "$HOME/logs/drift-check-post-deploy.log" 2>&1 &
+    ) &
+    disown 2>/dev/null || true
+}
+
+# Invoke the deploy-reviewer agent (non-blocking). Called after a successful
+# deploy. Safe to call even if the agent or CLI isn't installed — silently no-ops.
+trigger_deploy_review() {
+    local repo="$1" subdomain="$2" port="$3"
+    command -v claude >/dev/null 2>&1 || return 0
+    [[ -f "$HOME/.claude/agents/deploy-reviewer.md" ]] || return 0
+    local domain="${subdomain}.${DOMAIN}"
+    log "Triggering deploy-reviewer for $repo (non-blocking)"
+    (
+        # Source secrets so the agent can talk to Plane/tg-notify.
+        [[ -f "$HOME/claude-runner/secrets.env" ]] && set -a && \
+            . "$HOME/claude-runner/secrets.env" && set +a
+        DEPLOY_REPO="$repo" DEPLOY_PORT="$port" DEPLOY_DOMAIN="$domain" \
+            nohup claude --agent deploy-reviewer \
+                --dangerously-skip-permissions \
+                --no-session-persistence \
+                -p "Review deployment of $repo on $domain" \
+                >> "$HOME/claude-runner/logs/deploy-review.log" 2>&1 &
+    ) &
+    disown 2>/dev/null || true
+}
+
+main "$@"

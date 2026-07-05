@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+import os, sys
+# Resolve real script path (follow symlink from ~/bin/lemon)
+_here = os.path.dirname(os.path.realpath(__file__))
+if _here not in sys.path:
+    sys.path.insert(0, _here)
+from lemon_cli.main import main
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,101 @@
+services:
+  postgresql:
+    image: docker.io/library/postgres:16-alpine
+    container_name: authentik-db
+    profiles: ["legacy"]
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d authentik -U authentik"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 5s
+    volumes:
+      - ./postgres:/var/lib/postgresql/data
+    env_file:
+      - ./secrets.env
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "loki.project=authentik"
+      - "loki.environment=production"
+
+  redis:
+    image: docker.io/library/redis:alpine
+    container_name: authentik-redis
+    command: --save 60 1 --loglevel warning
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 3s
+    volumes:
+      - ./redis:/data
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "loki.project=authentik"
+      - "loki.environment=production"
+
+  server:
+    image: ghcr.io/goauthentik/server:2026.2.2
+    container_name: authentik-server
+    restart: unless-stopped
+    command: server
+    environment:
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_POSTGRESQL__HOST: postgres-shared
+      AUTHENTIK_POSTGRESQL__USER: authentik_owner
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+    env_file:
+      - ./secrets.env
+    volumes:
+      - ./media:/media
+      - ./custom-templates:/templates
+      - ./0056_user_roles_patched.py:/authentik/core/migrations/0056_user_roles.py:ro
+    ports:
+      - "127.0.0.1:9000:9000"
+    networks:
+      default: {}
+      lemon-internal: {}
+    depends_on:
+      redis:
+        condition: service_started
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "loki.project=authentik"
+      - "loki.environment=production"
+
+  worker:
+    image: ghcr.io/goauthentik/server:2026.2.2
+    container_name: authentik-worker
+    restart: unless-stopped
+    command: worker
+    environment:
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_POSTGRESQL__HOST: postgres-shared
+      AUTHENTIK_POSTGRESQL__USER: authentik_owner
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+    env_file:
+      - ./secrets.env
+    user: root
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./media:/media
+      - ./certs:/certs
+      - ./custom-templates:/templates
+      - ./0056_user_roles_patched.py:/authentik/core/migrations/0056_user_roles.py:ro
+    networks:
+      default: {}
+      lemon-internal: {}
+    depends_on:
+      redis:
+        condition: service_started
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "loki.project=authentik"
+      - "loki.environment=production"
+
+networks:
+  lemon-internal:
+    external: true

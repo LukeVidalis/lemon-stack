@@ -1,0 +1,56 @@
+# Caddy reverse proxy — lemon-stack
+# Cloudflare Tunnel terminates TLS at the edge; Caddy listens on host port 80 only.
+# Update Cloudflare Zero Trust tunnel routes to point each hostname to http://localhost:80
+# (one wildcard route `*.{{DOMAIN}} -> http://localhost:80` covers everything).
+
+{
+	auto_https off
+}
+
+import /etc/caddy/snippets/*.snippet
+
+# ---------------------------------------------------------------------------
+# Infrastructure subdomains
+# ---------------------------------------------------------------------------
+
+http://auth.{{DOMAIN}} {
+	reverse_proxy localhost:9000 {
+		header_up X-Forwarded-Proto https
+	}
+}
+
+http://outpost.{{DOMAIN}} {
+	# Authentik forward-auth outpost endpoint — referenced by the `authentik` snippet
+	reverse_proxy localhost:9000 {
+		header_up X-Forwarded-Proto https
+	}
+}
+
+http://bao.{{DOMAIN}} {
+	import authentik
+	reverse_proxy localhost:8200
+}
+
+http://grafana.{{DOMAIN}} {
+	import authentik
+	reverse_proxy localhost:3200
+}
+
+http://n8n.{{DOMAIN}} {
+	# n8n has its own auth — no SSO import
+	reverse_proxy localhost:5678
+}
+
+http://pihole.{{DOMAIN}} {
+	redir / /admin/ 302
+	reverse_proxy localhost:8088
+}
+
+# ---------------------------------------------------------------------------
+# Auto-deployed apps
+# ---------------------------------------------------------------------------
+# deploy.sh appends one block per app below this line. Do not hand-edit between
+# the BEGIN/END markers — they are managed by `~/deploy/deploy.sh`.
+#
+# # ===== BEGIN deploy.sh managed blocks =====
+# # ===== END deploy.sh managed blocks =====

@@ -1,0 +1,65 @@
+{
+    "hello-world": 10001,
+    "obsidian": 3010,
+    "food-planner": {
+        "app": 10004
+    },
+    "friendly": {
+        "api": 10002,
+        "web": 10003
+    },
+    "login-portal": {
+        "web": 10000
+    },
+    "plane": {
+        "proxy": 10005
+    },
+    "admin-ui": {
+        "api": 10006,
+        "web": 10007
+    },
+    "food-splitter": {
+        "app": 10008
+    },
+    "flashcards": 10009,
+    "macros": {
+        "api": 10010
+    },
+    "dashboard": {
+        "api": 10011,
+        "web": 10012
+    },
+    "financial-planner": {
+        "api": 10013,
+        "web": 10014
+    },
+    "households": {
+        "api": 10015
+    },
+    "notify": {
+        "api": 10016
+    },
+    "notify-service": {
+        "api": 10017
+    },
+    "risk-calculator": {
+        "api": 10018,
+        "web": 10019
+    },
+    "tg-notify": 10020,
+    "poker-copilot": {
+        "api": 10022,
+        "frontend": 10023
+    },
+    "actual": 10024,
+    "cashflow": {
+        "api": 10025,
+        "web": 10026
+    },
+    "vikunja": 10029,
+    "insilicoscreen": {
+        "api": 10027,
+        "web": 10028
+    },
+    "obsidian-webdav": 10030
+}

@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# intel-refresh-tick: weekly refresh tick. Picks next repo from refresh-queue,
+# runs intel-updater in --refresh mode, opens a PR only if intel actually changed.
+# Called by cron every 15 min on Sundays 01:01–07:46.
+set -u
+PATH={{USER_HOME}}/.local/bin:/usr/local/bin:/usr/bin:/bin
+export HOME={{USER_HOME}}
+
+BASE=$HOME/intel-bootstrap
+REFRESH_QUEUE=$BASE/refresh-queue.txt
+REFRESH_DONE=$BASE/refresh-done.txt
+WORKBASE=$HOME/intel-work
+LOGDIR=$BASE/logs
+
+mkdir -p "$LOGDIR" "$WORKBASE"
+
+# Use today's report (or most recent if run exactly at midnight edge)
+REFRESH_REPORT=$(ls -t "$BASE"/refresh-report-*.md 2>/dev/null | head -1)
+[[ -z "$REFRESH_REPORT" ]] && exit 0  # no reset has run yet
+
+LOCK=/tmp/intel-refresh.lock
+exec 9>"$LOCK"
+if ! flock -n 9; then
+  exit 0
+fi
+
+TS=$(date -u +%Y%m%dT%H%MZ)
+report() { printf '%s\n' "$1" >> "$REFRESH_REPORT"; }
+
+[[ -f "$REFRESH_QUEUE" ]] || exit 0
+
+# Pick next repo
+NEXT=""
+while IFS= read -r line; do
+  line="${line%$'\r'}"
+  [[ -z "$line" || "$line" == \#* ]] && continue
+  grep -qxF "$line" "$REFRESH_DONE" 2>/dev/null && continue
+  NEXT="$line"
+  break
+done < "$REFRESH_QUEUE"
+
+[[ -z "$NEXT" ]] && exit 0
+
+LOG=$LOGDIR/${NEXT}-refresh-${TS}.log
+exec >>"$LOG" 2>&1
+
+echo "=== refresh tick $TS — repo=$NEXT ==="
+
+DEFAULT_BRANCH=$(gh repo view "{{GITHUB_ORG}}/$NEXT" --json defaultBranchRef -q .defaultBranchRef.name)
+
+# Working dir
+if [[ -d "$HOME/$NEXT/.git" ]]; then
+  WORKDIR="$HOME/$NEXT"
+  pushd "$WORKDIR" >/dev/null
+  if ! git diff-index --quiet HEAD --; then
+    report "- ⚠ \`$NEXT\` ($TS) — local clone dirty, skipping"
+    echo "$NEXT" >> "$REFRESH_DONE"
+    popd >/dev/null
+    exit 0
+  fi
+  git checkout "$DEFAULT_BRANCH" && git pull --ff-only || true
+  popd >/dev/null
+else
+  WORKDIR="$WORKBASE/$NEXT"
+  if [[ ! -d "$WORKDIR/.git" ]]; then
+    git clone --depth 50 "https://github.com/{{GITHUB_ORG}}/$NEXT.git" "$WORKDIR" || {
+      report "- ❌ \`$NEXT\` ($TS) — clone failed"
+      echo "$NEXT" >> "$REFRESH_DONE"
+      exit 0
+    }
+  else
+    (cd "$WORKDIR" && git fetch origin --prune && git checkout "$DEFAULT_BRANCH" && git reset --hard "origin/$DEFAULT_BRANCH") || true
+  fi
+fi
+
+echo "workdir=$WORKDIR"
+
+PROMPT=$(cat <<EOF
+You are running as the intel-updater agent in REFRESH mode. Read your spec FIRST at {{USER_HOME}}/.claude/agents/intel-updater.md.
+
+Target repo: $WORKDIR
+Repo name: $NEXT
+Default branch: $DEFAULT_BRANCH
+Mode: --refresh
+
+In refresh mode: read each existing .planning/intel/ file, then check the source code to see if any claim is now wrong or materially stale (new services, new auth pattern, new secrets, removed files, changed deploy config, etc.). Only rewrite files that have stale content. If nothing has materially changed, output exactly '## INTEL UNCHANGED' and stop — do not rewrite any files.
+
+Context:
+- Read ~/deploy/ports.json for this repo's port allocation.
+- Reference {{USER_HOME}}/.claude/CLAUDE.md '## Critical Quirks' for global patterns — do NOT re-explain.
+- Focus on what could have changed since last generation: new endpoints, new env vars, changed Dockerfile base image, new dependencies, new migrations, changed CI config.
+
+DO NOT commit anything — the wrapper script handles git.
+
+End with EXACTLY one of:
+- '## INTEL UNCHANGED'
+- '## INTEL UPDATE COMPLETE'
+- '## INTEL UPDATE FAILED — <reason>'
+EOF
+)
+
+set +e
+timeout 900 claude -p "$PROMPT" \
+  --model sonnet \
+  --add-dir "$WORKDIR" \
+  --dangerously-skip-permissions
+CLAUDE_EXIT=$?
+set -e
+
+echo "claude_exit=$CLAUDE_EXIT"
+
+# Rate-limit detection
+if grep -qiE "usage limit|rate limit|credit balance|reached your usage|429|insufficient_quota|too many requests" "$LOG"; then
+  report "- ⏸ \`$NEXT\` ($TS) — rate-limited, will retry next tick"
+  exit 0
+fi
+
+if [[ $CLAUDE_EXIT -eq 124 ]]; then
+  report "- ⌛ \`$NEXT\` ($TS) — timed out (\`$LOG\`)"
+  echo "$NEXT" >> "$REFRESH_DONE"
+  exit 0
+fi
+
+# Unchanged — no PR needed
+if grep -q "INTEL UNCHANGED" "$LOG"; then
+  report "- ↔ \`$NEXT\` ($TS) — no changes"
+  echo "$NEXT" >> "$REFRESH_DONE"
+  exit 0
+fi
+
+if [[ $CLAUDE_EXIT -ne 0 ]] || ! grep -q "INTEL UPDATE COMPLETE" "$LOG"; then
+  report "- ❌ \`$NEXT\` ($TS) — failed (exit=$CLAUDE_EXIT, see \`$LOG\`)"
+  echo "$NEXT" >> "$REFRESH_DONE"
+  exit 0
+fi
+
+# Check if intel actually changed on disk
+cd "$WORKDIR"
+if git diff --quiet -- .planning/intel/; then
+  report "- ↔ \`$NEXT\` ($TS) — agent said COMPLETE but no file changes"
+  echo "$NEXT" >> "$REFRESH_DONE"
+  exit 0
+fi
+
+# Commit + push + PR + merge
+git branch -D intel/refresh 2>/dev/null || true
+git checkout -b intel/refresh
+git add .planning/
+
+git -c user.email={{ADMIN_EMAIL}} -c user.name=lemon commit \
+  -m "intel: weekly refresh .planning/intel/" \
+  -m "Updated by intel-updater agent (refresh mode). See PR for diff." || {
+  report "- ❌ \`$NEXT\` ($TS) — commit failed"
+  echo "$NEXT" >> "$REFRESH_DONE"
+  exit 0
+}
+
+git push -u --force-with-lease origin intel/refresh || {
+  report "- ❌ \`$NEXT\` ($TS) — push failed"
+  echo "$NEXT" >> "$REFRESH_DONE"
+  exit 0
+}
+
+PR_URL=$(gh pr create --base "$DEFAULT_BRANCH" --head intel/refresh \
+  --title "intel: weekly refresh .planning/intel/" \
+  --body "Auto-generated by intel-updater (refresh mode). Review the diff — only stale claims were updated." 2>/dev/null | tail -1)
+
+[[ -z "$PR_URL" ]] && PR_URL=$(gh pr list --head intel/refresh --state open --json url --jq '.[0].url')
+
+if ! gh pr merge --squash --delete-branch --auto "$PR_URL" 2>/dev/null; then
+  gh pr merge --squash --delete-branch --admin "$PR_URL" 2>/dev/null \
+    || gh pr merge --squash --delete-branch "$PR_URL" 2>/dev/null || true
+fi
+
+report "- ✅ \`$NEXT\` ($TS) — $PR_URL"
+echo "$NEXT" >> "$REFRESH_DONE"
+exit 0

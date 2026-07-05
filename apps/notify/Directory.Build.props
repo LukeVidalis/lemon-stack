@@ -1,0 +1,17 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <!-- Warnings-as-errors deliberately off for now — flip on once existing
+         CA warnings have been triaged. Track in a follow-up. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- OpenTelemetry transitive advisories with no fixed-version package yet. -->
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-g94r-2vxg-569j" />
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-4625-4j76-fww9" />
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-8785-wc3w-h8q6" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,271 @@
+{
+  "name": "Watchtower Weekly Digest",
+  "description": null,
+  "isArchived": false,
+  "nodes": [
+    {
+      "id": "2dfff29c-f074-48fc-80a7-e7ada1646928",
+      "name": "Monday 08:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "triggerAtHour": 8,
+              "triggerAtMinute": 0,
+              "triggerAtDay": [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "e7d03eaa-a4ed-40ab-b851-ed9eb0b90af8",
+      "name": "Get Watchtower Log",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:10021/cmd",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"command\": \"/watchtower\"}",
+        "options": {},
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "wWCqKaCTkTKBD56d",
+          "name": "server-cmd API"
+        }
+      }
+    },
+    {
+      "id": "fedd6367-6eae-4d31-bb49-46089e8a1d63",
+      "name": "Send Digest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://tg-notify:8080/send",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"level\": \"info\", \"title\": \"Watchtower Weekly Digest\", \"message\": \"={{ $json.output }}\"}",
+        "options": {},
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "WLERegIj33Xn9v90",
+          "name": "tg-notify API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Monday 08:00": {
+      "main": [
+        [
+          {
+            "node": "Get Watchtower Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Watchtower Log": {
+      "main": [
+        [
+          {
+            "node": "Send Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": null,
+  "activeVersionId": "1eb4328e-1663-45f4-9b8e-8df900df38eb",
+  "versionCounter": 17,
+  "activeVersion": {
+    "updatedAt": "2026-05-09T15:37:36.710Z",
+    "createdAt": "2026-05-09T15:37:36.710Z",
+    "versionId": "1eb4328e-1663-45f4-9b8e-8df900df38eb",
+    "workflowId": "frcJOagDlT3tEDiG",
+    "nodes": [
+      {
+        "id": "2dfff29c-f074-48fc-80a7-e7ada1646928",
+        "name": "Monday 08:00",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          200,
+          300
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "weeks",
+                "triggerAtHour": 8,
+                "triggerAtMinute": 0,
+                "triggerAtDay": [
+                  1
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "e7d03eaa-a4ed-40ab-b851-ed9eb0b90af8",
+        "name": "Get Watchtower Log",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          420,
+          300
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://host.docker.internal:10021/cmd",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "{\"command\": \"/watchtower\"}",
+          "options": {},
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "httpHeaderAuth"
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "wWCqKaCTkTKBD56d",
+            "name": "server-cmd API"
+          }
+        }
+      },
+      {
+        "id": "fedd6367-6eae-4d31-bb49-46089e8a1d63",
+        "name": "Send Digest",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          640,
+          300
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://tg-notify:8080/send",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "{\"level\": \"info\", \"title\": \"Watchtower Weekly Digest\", \"message\": \"={{ $json.output }}\"}",
+          "options": {},
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "httpHeaderAuth"
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "WLERegIj33Xn9v90",
+            "name": "tg-notify API"
+          }
+        }
+      }
+    ],
+    "connections": {
+      "Monday 08:00": {
+        "main": [
+          [
+            {
+              "node": "Get Watchtower Log",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Watchtower Log": {
+        "main": [
+          [
+            {
+              "node": "Send Digest",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "authors": "Loukas Vidalis",
+    "name": null,
+    "description": null,
+    "autosaved": false,
+    "workflowPublishHistory": [
+      {
+        "createdAt": "2026-05-09T15:37:36.806Z",
+        "id": 33,
+        "workflowId": "frcJOagDlT3tEDiG",
+        "versionId": "1eb4328e-1663-45f4-9b8e-8df900df38eb",
+        "event": "activated",
+        "userId": "c2419657-c13d-4a83-adc7-689f6c3d839d"
+      }
+    ]
+  }
+}

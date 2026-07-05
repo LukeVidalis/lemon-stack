@@ -1,0 +1,293 @@
+{
+  "name": "Daily Backup Digest",
+  "description": null,
+  "isArchived": false,
+  "nodes": [
+    {
+      "id": "b749a446-2559-4dc5-870c-ff8f6749db06",
+      "name": "Daily at 07:05",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "triggerAtHour": 7,
+              "triggerAtMinute": 5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "195623c1-acd1-4d25-b8e5-5aebc473e97f",
+      "name": "Get Backup Log",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:10021/cmd",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"command\": \"/backuplog\"}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "wWCqKaCTkTKBD56d",
+          "name": "server-cmd API"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "6fc261f4-4dde-4ff4-92ec-fd7d9b495d1f",
+      "name": "Send to Telegram",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://tg-notify:8080/send",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"level\": \"{{ $json.output.includes('Warning') || $json.output.includes('error') ? 'warning' : 'success' }}\", \"title\": \"Daily Backup Report\", \"message\": \"={{ $json.output.replace(/<\\\\/?pre>/g, '') }}\"}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "WLERegIj33Xn9v90",
+          "name": "tg-notify API"
+        }
+      },
+      "onError": "continueErrorOutput"
+    }
+  ],
+  "connections": {
+    "Daily at 07:05": {
+      "main": [
+        [
+          {
+            "node": "Get Backup Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Backup Log": {
+      "main": [
+        [
+          {
+            "node": "Send to Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": null,
+  "activeVersionId": "60ea33f2-5c32-4dec-a944-425c32b7ce46",
+  "versionCounter": 17,
+  "activeVersion": {
+    "updatedAt": "2026-05-09T15:34:52.834Z",
+    "createdAt": "2026-05-09T15:34:52.834Z",
+    "versionId": "60ea33f2-5c32-4dec-a944-425c32b7ce46",
+    "workflowId": "zwPyZSFyLrKSWIbT",
+    "nodes": [
+      {
+        "id": "b749a446-2559-4dc5-870c-ff8f6749db06",
+        "name": "Daily at 07:05",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          200,
+          300
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "days",
+                "triggerAtHour": 7,
+                "triggerAtMinute": 5
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "195623c1-acd1-4d25-b8e5-5aebc473e97f",
+        "name": "Get Backup Log",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          420,
+          300
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://host.docker.internal:10021/cmd",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "options": {
+            "response": {
+              "response": {
+                "responseFormat": "json"
+              }
+            }
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "{\"command\": \"/backuplog\"}",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "httpHeaderAuth"
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "wWCqKaCTkTKBD56d",
+            "name": "server-cmd API"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "id": "6fc261f4-4dde-4ff4-92ec-fd7d9b495d1f",
+        "name": "Send to Telegram",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          640,
+          300
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://tg-notify:8080/send",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "options": {
+            "response": {
+              "response": {
+                "responseFormat": "json"
+              }
+            }
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "{\"level\": \"{{ $json.output.includes('Warning') || $json.output.includes('error') ? 'warning' : 'success' }}\", \"title\": \"Daily Backup Report\", \"message\": \"={{ $json.output.replace(/<\\\\/?pre>/g, '') }}\"}",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "httpHeaderAuth"
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "WLERegIj33Xn9v90",
+            "name": "tg-notify API"
+          }
+        },
+        "onError": "continueErrorOutput"
+      }
+    ],
+    "connections": {
+      "Daily at 07:05": {
+        "main": [
+          [
+            {
+              "node": "Get Backup Log",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Backup Log": {
+        "main": [
+          [
+            {
+              "node": "Send to Telegram",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "authors": "Loukas Vidalis",
+    "name": null,
+    "description": null,
+    "autosaved": false,
+    "workflowPublishHistory": [
+      {
+        "createdAt": "2026-05-09T15:35:00.259Z",
+        "id": 30,
+        "workflowId": "zwPyZSFyLrKSWIbT",
+        "versionId": "60ea33f2-5c32-4dec-a944-425c32b7ce46",
+        "event": "activated",
+        "userId": "c2419657-c13d-4a83-adc7-689f6c3d839d"
+      }
+    ]
+  }
+}

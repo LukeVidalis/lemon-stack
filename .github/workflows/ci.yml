@@ -1,0 +1,56 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The maintainer's real identifiers come from a repo secret so the
+      # public tree never contains them. Forks without the secret skip the
+      # leak scan (check-templates.sh self-skips when the file is absent).
+      - name: Write leak-guard identifiers from secret
+        env:
+          IDS: ${{ secrets.LEAK_GUARD_IDENTIFIERS }}
+        run: |
+          if [ -n "$IDS" ]; then
+            printf '%s\n' "$IDS" > scripts/identifiers.env
+            echo "identifiers.env written from secret."
+          else
+            echo "No LEAK_GUARD_IDENTIFIERS secret — leak scan will be skipped."
+          fi
+
+      - name: Leak guard
+        run: bash scripts/check-templates.sh
+
+      - name: Template coverage
+        run: bash scripts/verify-template-coverage.sh
+
+      - name: Structural CLAUDE.md sections
+        run: bash scripts/check-structural-sections.sh
+
+      - name: Bash syntax check
+        run: |
+          fail=0
+          for f in $(git ls-files '*.sh'); do
+            grep -q '{{' "$f" && continue  # templated files aren't valid bash yet
+            bash -n "$f" || { echo "SYNTAX: $f"; fail=1; }
+          done
+          exit $fail
+
+      - name: Shellcheck (errors only)
+        run: |
+          fail=0
+          for f in $(git ls-files '*.sh'); do
+            grep -q '{{' "$f" && continue  # templated files aren't valid bash yet
+            shellcheck --severity=error "$f" || fail=1
+          done
+          exit $fail
+
+      - name: Cleanup identifiers
+        if: always()
+        run: rm -f scripts/identifiers.env

@@ -1,0 +1,6 @@
+	handle /api/* {
+		reverse_proxy localhost:{{API_PORT}}
+	}
+	handle {
+		reverse_proxy localhost:{{WEB_PORT}}
+	}

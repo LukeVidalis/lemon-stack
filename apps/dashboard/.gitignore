@@ -1,0 +1,10 @@
+node_modules/
+dist/
+bin/
+obj/
+*.user
+.vs/
+.idea/
+.env
+.env.local
+secrets.env

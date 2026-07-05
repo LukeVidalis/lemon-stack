@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+#
+# generate-claude-md.sh <repo-name> [workspace-path]
+#
+# Generates a CLAUDE.md for a {{GITHUB_ORG}} repo from deterministic sources:
+#   - ~/deploy/ports.json          (host ports)
+#   - workspace/docker-compose.yml (services + container ports)
+#   - workspace/deploy.conf        (subdomain override, auth mode)
+#   - workspace/.github/workflows/ (deploy branch)
+#   - workspace/.planning/intel/   (tech stack, auth model)
+#   - ~/docker/<repo>/secrets.env  (secret key names only)
+#
+# Writes to workspace/CLAUDE.md (stdout if --stdout).
+# Will NOT overwrite an existing CLAUDE.md unless --force is passed.
+#
+set -euo pipefail
+
+PORTS_FILE="{{USER_HOME}}/deploy/ports.json"
+DOCKER_DIR="{{USER_HOME}}/docker"
+DOMAIN="{{DOMAIN}}"
+
+usage() {
+    echo "Usage: $0 <repo-name> [workspace-path] [--stdout] [--force]" >&2
+    exit 1
+}
+
+# --- Args ---
+REPO="${1:-}"
+[[ -z "$REPO" ]] && usage
+
+WORKSPACE="${2:-{{USER_HOME}}/actions-runner/_work/$REPO/$REPO}"
+# Allow 2nd arg to be a flag
+if [[ "$WORKSPACE" == --* ]]; then
+    WORKSPACE="{{USER_HOME}}/actions-runner/_work/$REPO/$REPO"
+fi
+
+TO_STDOUT=false
+FORCE=false
+for arg in "$@"; do
+    case "$arg" in
+        --stdout) TO_STDOUT=true ;;
+        --force)  FORCE=true ;;
+    esac
+done
+
+# --- Helpers ---
+
+extract_section() {
+    local file="$1" heading="$2"
+    # Extract content from "## Heading" until next "## " or end of file
+    awk "/^## ${heading}/{found=1; next} found && /^## /{exit} found{print}" "$file" 2>/dev/null
+}
+
+first_bullet() {
+    # Return the first non-empty bullet line, stripped of "- " prefix
+    grep -m1 '^[-*]' | sed 's/^[-*] *//'
+}
+
+strip_md() {
+    # Strip markdown formatting markers, truncate at em-dash
+    echo "$1" \
+        | sed 's/\*\*\([^*]*\)\*\*/\1/g' \
+        | sed 's/`\([^`]*\)`/\1/g' \
+        | sed 's/\[\([^]]*\)\]([^)]*)/\1/g' \
+        | sed 's/ — .*//' \
+        | sed 's/ — .*//' \
+        | sed 's/[[:space:]]*$//' \
+        | head -c 120
+}
+
+first_sentence() {
+    # Return first clause (up to semicolon or em-dash), strip markdown
+    echo "$1" \
+        | sed 's/\*\*\([^*]*\)\*\*/\1/g' \
+        | sed 's/`\([^`]*\)`/\1/g' \
+        | sed 's/\[\([^]]*\)\]([^)]*)/\1/g' \
+        | sed 's/;.*//' \
+        | sed 's/ — .*//' \
+        | sed 's/ — .*//' \
+        | sed 's/[[:space:]]*$//' \
+        | head -c 120
+}
+
+# --- Workspace check ---
+if [[ ! -d "$WORKSPACE" ]]; then
+    echo "[generate-claude-md] Workspace not found: $WORKSPACE" >&2
+    echo "[generate-claude-md] Cloning {{GITHUB_ORG}}/$REPO ..." >&2
+    WORKSPACE_TMP=$(mktemp -d)
+    trap "rm -rf $WORKSPACE_TMP" EXIT
+    gh repo clone "{{GITHUB_ORG}}/$REPO" "$WORKSPACE_TMP/$REPO" -- --depth=1 >/dev/null 2>&1
+    WORKSPACE="$WORKSPACE_TMP/$REPO"
+fi
+
+if [[ ! -d "$WORKSPACE" ]]; then
+    echo "[generate-claude-md] ERROR: cannot locate or clone $REPO" >&2
+    exit 1
+fi
+
+OUTPUT_FILE="$WORKSPACE/CLAUDE.md"
+
+# --- Skip if exists and not forced ---
+if [[ -f "$OUTPUT_FILE" && "$FORCE" != "true" && "$TO_STDOUT" != "true" ]]; then
+    echo "[generate-claude-md] SKIPPED: $REPO already has CLAUDE.md (use --force to overwrite)" >&2
+    exit 0
+fi
+
+# --- Subdomain + auth from deploy.conf ---
+SUBDOMAIN="$REPO"
+AUTH_MODE="sso"
+DEPLOY_CONF="$WORKSPACE/deploy.conf"
+if [[ -f "$DEPLOY_CONF" ]]; then
+    while IFS='=' read -r key value; do
+        key=$(echo "$key" | tr -d '[:space:]')
+        value=$(echo "$value" | tr -d '[:space:]')
+        [[ -z "$key" || "$key" == \#* ]] && continue
+        case "$key" in
+            subdomain) SUBDOMAIN="$value" ;;
+            auth)      AUTH_MODE="$value" ;;
+        esac
+    done < "$DEPLOY_CONF"
+fi
+
+# --- Deploy branch from workflow ---
+DEPLOY_BRANCH="main"
+WORKFLOW_FILE=$(find "$WORKSPACE/.github/workflows" -name "*.yml" 2>/dev/null | head -1)
+if [[ -n "$WORKFLOW_FILE" ]]; then
+    branch_line=$(grep -m1 'branches:' "$WORKFLOW_FILE" 2>/dev/null || true)
+    if [[ -n "$branch_line" ]]; then
+        # Extract e.g. [main] or [master]
+        DEPLOY_BRANCH=$(echo "$branch_line" | grep -oP '(?<=\[)[^\]]+' | head -1 || echo "main")
+    fi
+fi
+
+# --- Tech stack from intel ---
+ARCH_FILE="$WORKSPACE/.planning/intel/ARCHITECTURE.md"
+STACK_LINE=""
+AUTH_LINE=""
+if [[ -f "$ARCH_FILE" ]]; then
+    raw_stack=$(extract_section "$ARCH_FILE" "Tech stack" | first_bullet)
+    STACK_LINE=$(strip_md "$raw_stack" | sed 's/^Runtime: //' | sed 's/^Framework: //' | sed 's/^API: //')
+    raw_auth=$(extract_section "$ARCH_FILE" "Auth model" | grep -m1 '.' | sed 's/^[[:space:]]*//' || true)
+    AUTH_LINE=$(first_sentence "$raw_auth")
+fi
+
+# Fallback tech stack: infer from repo contents
+if [[ -z "$STACK_LINE" ]]; then
+    if find "$WORKSPACE" -name "*.csproj" -maxdepth 3 | grep -q .; then
+        STACK_LINE=".NET / ASP.NET Core"
+    elif [[ -f "$WORKSPACE/package.json" ]]; then
+        STACK_LINE="Node.js"
+    elif find "$WORKSPACE" -name "Dockerfile" -maxdepth 3 | xargs grep -l "node" 2>/dev/null | grep -q .; then
+        STACK_LINE="Node.js"
+    else
+        STACK_LINE="(see repo)"
+    fi
+fi
+
+# Fallback auth
+if [[ -z "$AUTH_LINE" ]]; then
+    if [[ "$AUTH_MODE" == "none" ]]; then
+        AUTH_LINE="No Authentik SSO (bearer token or custom auth)"
+    else
+        AUTH_LINE="Authentik SSO via Caddy forward auth + X-Authentik-* headers"
+    fi
+fi
+
+# --- Services + ports from ports.json and docker-compose.yml ---
+PORTS_ENTRY=$(python3 -c "
+import json
+with open('$PORTS_FILE') as f:
+    d = json.load(f)
+v = d.get('$REPO')
+if v is None:
+    print('')
+elif isinstance(v, int):
+    print(f'single:{v}')
+else:
+    for svc, port in v.items():
+        print(f'{svc}:{port}')
+" 2>/dev/null)
+
+# Parse docker-compose.yml for container ports
+COMPOSE_FILE="$WORKSPACE/docker-compose.yml"
+SERVICES_TABLE=""
+if [[ -n "$PORTS_ENTRY" ]]; then
+    # For each service:port from ports.json, find container port in compose
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
+        if [[ "$entry" == single:* ]]; then
+            host_port="${entry#single:}"
+            # Find container port from compose or deploy.conf
+            container_port=$(grep -m1 'container_port' "$DEPLOY_CONF" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || echo "8080")
+            [[ -z "$container_port" ]] && container_port="8080"
+            SERVICES_TABLE="${SERVICES_TABLE}| $REPO | $host_port | $container_port |\n"
+        else
+            svc="${entry%%:*}"
+            host_port="${entry##*:}"
+            # Find container port for this service in compose
+            container_port="8080"
+            if [[ -f "$COMPOSE_FILE" ]]; then
+                container_port=$(python3 -c "
+import yaml, sys
+with open('$COMPOSE_FILE') as f:
+    c = yaml.safe_load(f)
+svc = c.get('services', {}).get('$svc', {})
+ports = svc.get('ports', [])
+if ports:
+    raw = ports[0]
+    if isinstance(raw, dict):
+        print(raw.get('target', 8080))
+    else:
+        print(str(raw).split(':')[-1].split('/')[0])
+else:
+    print('8080')
+" 2>/dev/null || echo "8080")
+            fi
+            SERVICES_TABLE="${SERVICES_TABLE}| $svc | $host_port | $container_port |\n"
+        fi
+    done <<< "$PORTS_ENTRY"
+fi
+
+if [[ -z "$SERVICES_TABLE" ]]; then
+    SERVICES_TABLE="| (unknown) | — | — |\n"
+fi
+
+# --- Secrets from ~/docker/<repo>/secrets.env (or inferred from compose) ---
+SECRETS_LIST=""
+SECRETS_ENV="$DOCKER_DIR/$REPO/secrets.env"
+if [[ -f "$SECRETS_ENV" ]]; then
+    while IFS='=' read -r key _rest; do
+        [[ -z "$key" || "$key" == \#* ]] && continue
+        key=$(echo "$key" | tr -d '[:space:]')
+        [[ -z "$key" ]] && continue
+        SECRETS_LIST="${SECRETS_LIST}- \`${key}\`\n"
+    done < "$SECRETS_ENV"
+fi
+
+# Fallback: extract ${VAR_NAME} references from workspace docker-compose.yml
+if [[ -z "$SECRETS_LIST" && -f "$COMPOSE_FILE" ]]; then
+    inferred=$(grep -oP '\$\{\K[^}]+' "$COMPOSE_FILE" 2>/dev/null \
+        | grep -v ':-' | grep -v 'API_PORT' \
+        | sort -u || true)
+    if [[ -n "$inferred" ]]; then
+        while IFS= read -r key; do
+            [[ -z "$key" ]] && continue
+            SECRETS_LIST="${SECRETS_LIST}- \`${key}\`\n"
+        done <<< "$inferred"
+        SECRETS_LIST="${SECRETS_LIST}_(inferred from docker-compose.yml — create \`~/docker/${REPO}/secrets.env\` with these keys)_\n"
+    fi
+fi
+
+if [[ -z "$SECRETS_LIST" ]]; then
+    SECRETS_LIST="_(create \`~/docker/${REPO}/secrets.env\` if secrets are needed)_\n"
+fi
+
+# --- Intel pointer ---
+INTEL_LINE=""
+if [[ -d "$WORKSPACE/.planning/intel" ]]; then
+    INTEL_LINE="- Intel files: [\`.planning/intel/\`](.planning/intel/) — architecture, conventions, deploy, gotchas, entry-points"
+else
+    INTEL_LINE="- _(no .planning/intel/ files yet)_"
+fi
+
+# --- Auth footnote in quick links ---
+if [[ "$AUTH_MODE" == "none" ]]; then
+    CADDY_ROUTE_NOTE="No Authentik SSO — see deploy.conf"
+else
+    CADDY_ROUTE_NOTE="Caddy + Authentik SSO forward auth"
+fi
+
+# --- First host port for quick links ---
+FIRST_PORT=$(echo "$PORTS_ENTRY" | head -1 | grep -oP '\d+$' || echo "?")
+
+# --- Generate CLAUDE.md ---
+TITLE=$(echo "$REPO" | sed 's/-/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1))substr($i,2); print}')
+
+GENERATED="# ${TITLE}
+
+**URL:** https://${SUBDOMAIN}.${DOMAIN}
+**Stack:** ${STACK_LINE}
+**Auth:** ${AUTH_LINE}
+**Deploy:** push to \`${DEPLOY_BRANCH}\` → auto-deploys via GitHub Actions
+
+## Services
+
+| Service | Host port | Container port |
+|---------|-----------|----------------|
+$(echo -e "$SERVICES_TABLE")
+## Secrets (\`~/docker/${REPO}/secrets.env\`)
+
+$(echo -e "$SECRETS_LIST")
+## Quick links
+
+${INTEL_LINE}
+- Subdomain routes: \`${SUBDOMAIN}.${DOMAIN}\` → \`127.0.0.1:${FIRST_PORT}\` via ${CADDY_ROUTE_NOTE}
+"
+
+# --- Output ---
+if [[ "$TO_STDOUT" == "true" ]]; then
+    echo "$GENERATED"
+else
+    echo "$GENERATED" > "$OUTPUT_FILE"
+    echo "[generate-claude-md] Written: $OUTPUT_FILE"
+fi

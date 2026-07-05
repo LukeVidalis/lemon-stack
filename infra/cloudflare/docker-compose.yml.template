@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    command: tunnel --no-autoupdate --metrics 127.0.0.1:20241 run --token ${TUNNEL_TOKEN}
+    env_file:
+      - .env
+    network_mode: host  # This allows the container to access localhost
+    restart: unless-stopped

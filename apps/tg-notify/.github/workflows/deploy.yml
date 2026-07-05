@@ -1,0 +1,7 @@
+name: Deploy
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    uses: {{GITHUB_ORG}}/.github/.github/workflows/deploy.yml@main

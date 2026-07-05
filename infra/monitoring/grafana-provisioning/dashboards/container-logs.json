@@ -1,0 +1,171 @@
+{
+  "uid": "lemon-container-logs",
+  "title": "Container Logs",
+  "description": "Centralized log viewer for all Docker containers on lemon-server",
+  "tags": ["logs", "lemon-server"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "project",
+        "label": "Project",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "lemon-loki" },
+        "query": "label_values(project)",
+        "multi": false,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": { "text": "All", "value": "$__all" },
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0
+      },
+      {
+        "name": "container",
+        "label": "Container",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "lemon-loki" },
+        "query": "label_values({project=~\"$project\"}, container)",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": { "text": "All", "value": "$__all" },
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0
+      },
+      {
+        "name": "stream",
+        "label": "Stream",
+        "type": "custom",
+        "options": [
+          { "text": "All", "value": ".+", "selected": true },
+          { "text": "stdout", "value": "stdout", "selected": false },
+          { "text": "stderr", "value": "stderr", "selected": false }
+        ],
+        "multi": false,
+        "includeAll": false,
+        "current": { "text": "All", "value": ".+" },
+        "hide": 0
+      },
+      {
+        "name": "search",
+        "label": "Search",
+        "type": "textbox",
+        "current": { "text": "", "value": "" },
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Log Volume",
+      "description": "Log lines per second by container",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 6 },
+      "datasource": { "type": "loki", "uid": "lemon-loki" },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 1, "fillOpacity": 10, "stacking": { "mode": "normal" } },
+          "unit": "short"
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "lemon-loki" },
+          "expr": "sum by (container) (rate({container=~\"$container\", project=~\"$project\", stream=~\"$stream\"}[$__interval]))",
+          "legendFormat": "{{container}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Error Rate",
+      "description": "Lines matching error/exception/fatal/panic per second",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 6, "w": 24, "h": 5 },
+      "datasource": { "type": "loki", "uid": "lemon-loki" },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 1, "fillOpacity": 10 },
+          "unit": "short",
+          "color": { "mode": "fixed", "fixedColor": "red" }
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "lemon-loki" },
+          "expr": "sum by (container) (rate({container=~\"$container\", project=~\"$project\"} |~ \"(?i)(error|exception|fatal|panic|critical)\" [$__interval]))",
+          "legendFormat": "{{container}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "All Logs",
+      "description": "Use the Project / Container / Stream dropdowns and Search box to filter",
+      "type": "logs",
+      "gridPos": { "x": 0, "y": 11, "w": 24, "h": 16 },
+      "datasource": { "type": "loki", "uid": "lemon-loki" },
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "lemon-loki" },
+          "expr": "{container=~\"$container\", project=~\"$project\", stream=~\"$stream\"} |~ \"(?i)$search\"",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Errors & Warnings",
+      "description": "Lines matching error, warn, exception, fatal, panic, critical",
+      "type": "logs",
+      "gridPos": { "x": 0, "y": 27, "w": 24, "h": 12 },
+      "datasource": { "type": "loki", "uid": "lemon-loki" },
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "lemon-loki" },
+          "expr": "{container=~\"$container\", project=~\"$project\"} |~ \"(?i)(error|warn|exception|fatal|panic|critical)\"",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,229 @@
+{
+  "name": "Daily Claude Code Session",
+  "description": null,
+  "isArchived": false,
+  "nodes": [
+    {
+      "id": "sched-trigger-001",
+      "name": "7 AM Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "set-prompt-001",
+      "name": "Set Prompt",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        480,
+        300
+      ],
+      "parameters": {
+        "mode": "manual",
+        "fields": {
+          "values": [
+            {
+              "name": "prompt",
+              "type": "stringValue",
+              "value": "Say hi!"
+            },
+            {
+              "name": "work_dir",
+              "type": "stringValue",
+              "value": "{{USER_HOME}}"
+            },
+            {
+              "name": "label",
+              "type": "stringValue",
+              "value": "morning-check"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "http-runner-001",
+      "name": "Trigger Claude Runner",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:9879/run/scheduled",
+        "sendHeaders": false,
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ prompt: $json.prompt, work_dir: $json.work_dir, label: $json.label }) }}",
+        "options": {
+          "timeout": 5000
+        }
+      }
+    }
+  ],
+  "connections": {
+    "7 AM Trigger": {
+      "main": [
+        [
+          {
+            "node": "Set Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Prompt": {
+      "main": [
+        [
+          {
+            "node": "Trigger Claude Runner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": null,
+  "activeVersionId": "f2f0a810-0fe4-430d-8cdd-7a4ecc60452a",
+  "versionCounter": 8,
+  "activeVersion": {
+    "updatedAt": "2026-05-17T08:26:14.921Z",
+    "createdAt": "2026-05-17T08:26:14.921Z",
+    "versionId": "f2f0a810-0fe4-430d-8cdd-7a4ecc60452a",
+    "workflowId": "opRs4SGsCwzkqhKr",
+    "nodes": [
+      {
+        "id": "sched-trigger-001",
+        "name": "7 AM Trigger",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          240,
+          300
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "cronExpression",
+                "expression": "0 6 * * *"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "set-prompt-001",
+        "name": "Set Prompt",
+        "type": "n8n-nodes-base.set",
+        "typeVersion": 3.4,
+        "position": [
+          480,
+          300
+        ],
+        "parameters": {
+          "mode": "manual",
+          "fields": {
+            "values": [
+              {
+                "name": "prompt",
+                "type": "stringValue",
+                "value": "Say hi!"
+              },
+              {
+                "name": "work_dir",
+                "type": "stringValue",
+                "value": "{{USER_HOME}}"
+              },
+              {
+                "name": "label",
+                "type": "stringValue",
+                "value": "morning-check"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "http-runner-001",
+        "name": "Trigger Claude Runner",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          720,
+          300
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://host.docker.internal:9879/run/scheduled",
+          "sendHeaders": false,
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ prompt: $json.prompt, work_dir: $json.work_dir, label: $json.label }) }}",
+          "options": {
+            "timeout": 5000
+          }
+        }
+      }
+    ],
+    "connections": {
+      "7 AM Trigger": {
+        "main": [
+          [
+            {
+              "node": "Set Prompt",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Set Prompt": {
+        "main": [
+          [
+            {
+              "node": "Trigger Claude Runner",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "authors": "Loukas Vidalis",
+    "name": null,
+    "description": null,
+    "autosaved": false,
+    "workflowPublishHistory": [
+      {
+        "createdAt": "2026-05-17T08:26:23.143Z",
+        "id": 37,
+        "workflowId": "opRs4SGsCwzkqhKr",
+        "versionId": "f2f0a810-0fe4-430d-8cdd-7a4ecc60452a",
+        "event": "activated",
+        "userId": "c2419657-c13d-4a83-adc7-689f6c3d839d"
+      }
+    ]
+  }
+}

@@ -1,0 +1,40 @@
+services:
+  openbao:
+    image: openbao/openbao:latest
+    container_name: openbao
+    restart: unless-stopped
+    networks: [lemon-internal]
+    cap_add:
+      - IPC_LOCK
+    command: ["server", "-config=/openbao/config/openbao.hcl"]
+    environment:
+      BAO_ADDR: http://127.0.0.1:8200
+      BAO_API_ADDR: http://openbao:8200
+      BAO_CLUSTER_ADDR: http://openbao:8201
+    volumes:
+      - ./config:/openbao/config:ro
+      - ./data:/openbao/data
+      - ./snapshots:/openbao/snapshots
+      - ./logs:/openbao/logs
+    ports:
+      - "127.0.0.1:8200:8200"
+    healthcheck:
+      # 200 = unsealed+initialized; 429 = standby (single-node n/a); 472 = DR standby;
+      # 501 = not initialized; 503 = sealed. We treat 200/429/501/503 as "process up".
+      test: ["CMD-SHELL", "wget -q -O /dev/null --server-response http://127.0.0.1:8200/v1/sys/health?standbyok=true 2>&1 | awk '/HTTP/{print $$2}' | grep -E '^(200|429|472|501|503)$$' >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+      loki.project: openbao
+      loki.environment: production
+
+networks:
+  lemon-internal:
+    external: true

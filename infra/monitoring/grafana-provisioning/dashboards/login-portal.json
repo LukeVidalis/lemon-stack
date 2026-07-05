@@ -1,0 +1,119 @@
+{
+  "uid": "login-portal",
+  "title": "Login Portal Telemetry",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "tags": ["login-portal", "authentik"],
+  "time": { "from": "now-24h", "to": "now" },
+  "timepicker": {},
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Events per minute by name",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "sum by (evt) (count_over_time({container=\"login-portal-web-1\"} |= \"PORTAL_TELEMETRY\" | regexp \"body=(?P<body>.*)$\" | line_format \"{{.body}}\" | json | __error__=\"\" [1m]))",
+          "refId": "A",
+          "legendFormat": "{{evt}}"
+        }
+      ],
+      "options": { "legend": { "displayMode": "table", "placement": "right" } }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "ui.error.shown — error texts (last 24h)",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 10 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "topk(20, sum by (data_text) (count_over_time({container=\"login-portal-web-1\"} |= \"PORTAL_TELEMETRY\" |= \"ui.error.shown\" | regexp \"body=(?P<body>.*)$\" | line_format \"{{.body}}\" | json | __error__=\"\" | evt=\"ui.error.shown\" | line_format \"{{.data_text}}\" | json data_text=\"data.text\" [24h])))",
+          "refId": "A",
+          "format": "table",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "redirect.chosen — final destinations (last 24h)",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 10 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "topk(20, sum by (data_final_dest, data_source) (count_over_time({container=\"login-portal-web-1\"} |= \"PORTAL_TELEMETRY\" |= \"redirect.chosen\" | regexp \"body=(?P<body>.*)$\" | line_format \"{{.body}}\" | json | __error__=\"\" | evt=\"redirect.chosen\" | json data_final_dest=\"data.final_dest\", data_source=\"data.source\" [24h])))",
+          "refId": "A",
+          "format": "table",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "restart.triggered vs restart.capped",
+      "gridPos": { "x": 0, "y": 18, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "sum(count_over_time({container=\"login-portal-web-1\"} |= \"PORTAL_TELEMETRY\" |= \"restart.triggered\" [5m]))",
+          "refId": "A",
+          "legendFormat": "restart.triggered"
+        },
+        {
+          "expr": "sum(count_over_time({container=\"login-portal-web-1\"} |= \"PORTAL_TELEMETRY\" |= \"restart.capped\" [5m]))",
+          "refId": "B",
+          "legendFormat": "restart.capped"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "challenge.unsupported — components hit",
+      "gridPos": { "x": 12, "y": 18, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "topk(20, sum by (data_component) (count_over_time({container=\"login-portal-web-1\"} |= \"PORTAL_TELEMETRY\" |= \"challenge.unsupported\" | regexp \"body=(?P<body>.*)$\" | line_format \"{{.body}}\" | json | __error__=\"\" | evt=\"challenge.unsupported\" | json data_component=\"data.component\" [24h])))",
+          "refId": "A",
+          "format": "table",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Sessions affected by error.shown (5m)",
+      "gridPos": { "x": 0, "y": 26, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "count(count by (sid) (count_over_time({container=\"login-portal-web-1\"} |= \"PORTAL_TELEMETRY\" |= \"ui.error.shown\" | regexp \"body=(?P<body>.*)$\" | line_format \"{{.body}}\" | json sid=\"sid\" | __error__=\"\" [5m])))",
+          "refId": "A",
+          "legendFormat": "affected sessions / 5m"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "logs",
+      "title": "Raw telemetry stream (last 100 lines)",
+      "gridPos": { "x": 0, "y": 34, "w": 24, "h": 12 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "{container=\"login-portal-web-1\"} |= \"PORTAL_TELEMETRY\"",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

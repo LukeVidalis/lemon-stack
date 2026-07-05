@@ -1,0 +1,12 @@
+{
+  "_docs": "Register apps that implement the admin permissions API contract. baseUrl is the internal Docker network address.",
+  "apps": [
+    {
+      "_example": true,
+      "slug": "food-planner",
+      "name": "Food Planner",
+      "baseUrl": "http://food-planner-app:5000",
+      "icon": "restaurant"
+    }
+  ]
+}

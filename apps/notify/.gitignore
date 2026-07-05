@@ -1,0 +1,26 @@
+## .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+*.swp
+*.DS_Store
+
+## Rider / JetBrains
+.idea/
+
+## VS Code
+.vscode/
+
+## Publish output
+publish/
+out/
+
+## EF Core migrations (keep your own, ignore generated temp files)
+*.dbmdl
+
+## Local secrets — NEVER commit
+.env
+secrets.env
+appsettings.Local.json

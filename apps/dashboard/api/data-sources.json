@@ -1,0 +1,54 @@
+{
+  "sources": [
+    {
+      "slug": "macros",
+      "name": "Macros",
+      "host": "127.0.0.1",
+      "port": 10010,
+      "path": "/api/_internal/user-summary",
+      "icon": "utensils",
+      "deepLink": "https://macros.{{DOMAIN}}/",
+      "enabled": true
+    },
+    {
+      "slug": "friendly",
+      "name": "Friendly",
+      "host": "127.0.0.1",
+      "port": 10002,
+      "path": "/api/_internal/user-summary",
+      "icon": "users",
+      "deepLink": "https://friendly.{{DOMAIN}}/",
+      "enabled": true
+    },
+    {
+      "slug": "food-planner",
+      "name": "Food Planner",
+      "host": "127.0.0.1",
+      "port": 10004,
+      "path": "/api/_internal/user-summary",
+      "icon": "calendar",
+      "deepLink": "https://food-planner.{{DOMAIN}}/",
+      "enabled": true
+    },
+    {
+      "slug": "admin",
+      "name": "Admin",
+      "host": "127.0.0.1",
+      "port": 10006,
+      "path": "/api/_internal/user-summary",
+      "icon": "shield",
+      "deepLink": "https://admin.{{DOMAIN}}/",
+      "enabled": true
+    },
+    {
+      "slug": "sts2-dashboard",
+      "name": "Slay the Spire 2",
+      "host": "127.0.0.1",
+      "port": 10033,
+      "path": "/api/_internal/user-summary",
+      "icon": "bar-chart-3",
+      "deepLink": "https://sts2-dashboard.{{DOMAIN}}/",
+      "enabled": true
+    }
+  ]
+}

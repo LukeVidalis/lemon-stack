@@ -1,0 +1,48 @@
+# Secrets — never commit
+*.env
+!*.example.env
+!parameters.example.env
+secrets.env
+.bao-*
+.bao-role-id
+.bao-secret-id
+init.json
+*.pw
+.restic-env
+.github-packages-token
+
+# Runtime state files
+ports.json
+!ports.json.example
+
+# Rendered templates (templates ship; rendered output is per-host).
+# Each *.template renders to a sibling file with the .template suffix stripped.
+**/*.rendered
+bin/generate-claude-md.sh
+bin/backfill-claude-md.sh
+bin/intel-refresh-tick.sh
+deploy/deploy.sh
+deploy/bao-fetch.sh
+infra/**/docker-compose.yml
+infra/**/Caddyfile
+infra/caddy/snippets/*.snippet
+infra/openbao/config/*.hcl
+infra/authentik/blueprints/*.yaml
+deploy/github-reusable-workflow/.github/workflows/deploy.yml
+deploy/template-repo/.github/workflows/deploy.yml
+apps/**/docker-compose.yml
+apps/**/*.service
+claude/CLAUDE.md
+claude/settings.json
+claude/skills/drift-check/scripts/extract.py
+claude/skills/drift-check/scripts/verify.py
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Setup state
+setup/parameters.env

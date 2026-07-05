@@ -1,0 +1,307 @@
+# Reusable deploy workflow for lemon-stack projects
+# Called by individual repos via a 4-line workflow caller
+#
+# What it does:
+#   1. Checks out the repo
+#   2. Runs tests (if test script exists)
+#   3. Calls deploy.sh on the self-hosted runner
+#   4. Runs Trivy vulnerability scan → uploads SARIF to Security tab
+#   5. Checks image size delta (warns if >15% growth)
+#   6. Runs Lighthouse audit for web-serving repos (direct container port, bypasses SSO)
+#
+# Requirements:
+#   - Repo must have a Dockerfile (single-service) or docker-compose.yml (multi-service)
+#   - Self-hosted runner registered at org level on lemon-server
+
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      subdomain:
+        description: 'Override subdomain (default: repo name)'
+        required: false
+        type: string
+      skip_tests:
+        description: 'Skip test step'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  test:
+    if: ${{ !inputs.skip_tests }}
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect and run tests
+        run: |
+          # Try common test runners in order
+          if [[ -f "package.json" ]] && grep -q '"test"' package.json; then
+            echo "Running: npm test"
+            npm ci --prefer-offline 2>/dev/null || npm install
+            npm test
+          elif [[ -f "requirements.txt" ]] && [[ -f "pytest.ini" || -d "tests" ]]; then
+            echo "Running: pytest"
+            python3 -m venv .venv
+            . .venv/bin/activate
+            pip install -r requirements.txt
+            pip install pytest
+            pytest
+          elif [[ -f "go.mod" ]]; then
+            echo "Running: go test"
+            go test ./...
+          elif [[ -f "Cargo.toml" ]]; then
+            echo "Running: cargo test"
+            cargo test
+          elif [[ -f "Makefile" ]] && grep -q '^test:' Makefile; then
+            echo "Running: make test"
+            make test
+          else
+            echo "No test runner detected, skipping tests"
+          fi
+
+  deploy:
+    needs: [test]
+    if: always() && (needs.test.result == 'success' || needs.test.result == 'skipped')
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Write .env file (if secrets exist)
+        if: ${{ env.ENV_FILE != '' }}
+        env:
+          ENV_FILE: ${{ secrets.ENV_FILE }}
+        run: |
+          REPO_NAME="${{ github.event.repository.name }}"
+          PROJECT_DIR="{{USER_HOME}}/docker/${REPO_NAME}"
+          mkdir -p "$PROJECT_DIR"
+          echo "$ENV_FILE" > "$PROJECT_DIR/.env"
+          chmod 600 "$PROJECT_DIR/.env"
+
+      - name: Deploy
+        env:
+          DEPLOY_COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          {{USER_HOME}}/deploy/deploy.sh \
+            "${{ github.event.repository.name }}" \
+            "${{ github.workspace }}"
+
+  scan:
+    needs: [deploy]
+    if: needs.deploy.result == 'success'
+    runs-on: self-hosted
+    permissions:
+      security-events: write
+    outputs:
+      warned: ${{ steps.trivy.outputs.warned }}
+      details: ${{ steps.trivy.outputs.details }}
+    steps:
+      - name: Run Trivy and upload SARIF
+        id: trivy
+        run: |
+          REPO="${{ github.event.repository.name }}"
+          IMAGE="lemon-${REPO}:latest"
+
+          if ! command -v trivy &>/dev/null; then
+            echo "Installing Trivy..."
+            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+          fi
+
+          if ! docker image inspect "$IMAGE" &>/dev/null; then
+            IMAGES=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep "^lemon-${REPO}" || true)
+            if [ -z "$IMAGES" ]; then
+              echo "No image found, skipping"
+              echo "warned=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          else
+            IMAGES="$IMAGE"
+          fi
+
+          mkdir -p /tmp/trivy-sarif
+
+          for IMG in $IMAGES; do
+            SAFE=$(echo "$IMG" | tr '/:' '--')
+            trivy image \
+              --exit-code 0 \
+              --severity HIGH,CRITICAL \
+              --format sarif \
+              --ignore-unfixed \
+              --output "/tmp/trivy-sarif/${SAFE}.sarif" \
+              "$IMG" || true
+
+            # Also print table to log for quick inspection
+            trivy image \
+              --exit-code 0 \
+              --severity HIGH,CRITICAL \
+              --format table \
+              --ignore-unfixed \
+              --quiet \
+              "$IMG" || true
+          done
+
+          # Count findings across all SARIF files
+          TOTAL=0
+          for SF in /tmp/trivy-sarif/*.sarif; do
+            [ -f "$SF" ] || continue
+            COUNT=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(sum(len(r.get('results',[])) for r in d.get('runs',[])))" "$SF" 2>/dev/null || echo 0)
+            TOTAL=$((TOTAL + COUNT))
+          done
+
+          if [ "$TOTAL" -gt 0 ]; then
+            echo "warned=true" >> $GITHUB_OUTPUT
+            echo "details=${TOTAL} HIGH/CRITICAL CVEs" >> $GITHUB_OUTPUT
+          else
+            echo "warned=false" >> $GITHUB_OUTPUT
+            echo "details=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        continue-on-error: true  # requires GitHub Advanced Security for private repos
+        with:
+          sarif_file: /tmp/trivy-sarif/
+          category: trivy-container
+
+  size-check:
+    needs: [deploy]
+    if: needs.deploy.result == 'success'
+    runs-on: self-hosted
+    outputs:
+      warned: ${{ steps.check.outputs.warned }}
+      details: ${{ steps.check.outputs.details }}
+    steps:
+      - name: Check image size delta
+        id: check
+        run: |
+          REPO="${{ github.event.repository.name }}"
+          SIZE_FILE="/tmp/image-sizes/${REPO}.txt"
+          mkdir -p /tmp/image-sizes
+
+          IMAGES=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep "^lemon-${REPO}" || true)
+
+          if [ -z "$IMAGES" ]; then
+            echo "No images found for $REPO, skipping size check"
+            echo "warned=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Current image sizes:"
+          docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep "^lemon-${REPO}" || true
+
+          WARNINGS=""
+          if [ -f "$SIZE_FILE" ]; then
+            echo "Previous sizes:"
+            cat "$SIZE_FILE"
+
+            for IMG in $IMAGES; do
+              CURR_BYTES=$(docker inspect "$IMG" --format='{{.Size}}' 2>/dev/null || echo 0)
+              PREV_BYTES=$(grep "^${IMG} " "$SIZE_FILE" 2>/dev/null | awk '{print $2}' || echo 0)
+
+              if [ "$PREV_BYTES" -gt 0 ] && [ "$CURR_BYTES" -gt 0 ]; then
+                GROWTH=$(( (CURR_BYTES - PREV_BYTES) * 100 / PREV_BYTES ))
+                if [ "$GROWTH" -gt 15 ]; then
+                  echo "WARNING: $IMG grew by ${GROWTH}%"
+                  WARNINGS="${WARNINGS}${IMG} +${GROWTH}%; "
+                else
+                  echo "OK: $IMG size change ${GROWTH}%"
+                fi
+              fi
+            done
+          fi
+
+          # Store current sizes for next run
+          > "$SIZE_FILE"
+          for IMG in $IMAGES; do
+            BYTES=$(docker inspect "$IMG" --format='{{.Size}}' 2>/dev/null || echo 0)
+            echo "$IMG $BYTES" >> "$SIZE_FILE"
+          done
+
+          if [ -n "$WARNINGS" ]; then
+            echo "warned=true" >> $GITHUB_OUTPUT
+            echo "details=${WARNINGS%%; }" >> $GITHUB_OUTPUT
+          else
+            echo "warned=false" >> $GITHUB_OUTPUT
+            echo "details=" >> $GITHUB_OUTPUT
+          fi
+
+  lighthouse:
+    needs: [deploy]
+    if: needs.deploy.result == 'success'
+    runs-on: self-hosted
+    outputs:
+      warned: ${{ steps.run-lighthouse.outputs.warned || 'false' }}
+    steps:
+      - name: Resolve web port from ports.json
+        id: detect
+        run: |
+          REPO="${{ github.event.repository.name }}"
+          PORT=$(python3 -c "
+          import json, sys
+          with open('{{USER_HOME}}/deploy/ports.json') as f:
+              d = json.load(f)
+          entry = d.get('$REPO')
+          if isinstance(entry, dict):
+              for k in ['web', 'app']:
+                  if k in entry:
+                      print(entry[k])
+                      sys.exit(0)
+          sys.exit(0)
+          " 2>/dev/null || true)
+
+          if [ -n "$PORT" ]; then
+            echo "port=$PORT" >> $GITHUB_OUTPUT
+            echo "has_web=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_web=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Lighthouse CI
+        if: steps.detect.outputs.has_web == 'true'
+        run: |
+          if ! command -v lhci &>/dev/null; then
+            npm install -g @lhci/cli@0.14.x
+          fi
+
+      - name: Run Lighthouse
+        id: run-lighthouse
+        if: steps.detect.outputs.has_web == 'true'
+        run: |
+          PORT="${{ steps.detect.outputs.port }}"
+          URL="http://localhost:${PORT}"
+
+          # Wait up to 30s for container to be reachable
+          for i in $(seq 1 15); do
+            if curl -sf --max-time 2 "$URL" > /dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+
+          LHCI_OK=true
+          lhci autorun \
+            --collect.url="$URL" \
+            --collect.numberOfRuns=1 \
+            --collect.settings.chromeFlags="--no-sandbox --disable-dev-shm-usage" \
+            --assert.preset=lighthouse:recommended \
+            --assert.assertions.categories:performance.minScore=0.6 \
+            --assert.assertions.categories:accessibility.minScore=0.8 \
+            --assert.assertions.categories:best-practices.minScore=0.8 \
+            --upload.target=temporary-public-storage \
+            || LHCI_OK=false
+
+          if [ "$LHCI_OK" = "false" ]; then
+            echo "warned=true" >> $GITHUB_OUTPUT
+            echo "Lighthouse: scores below threshold (non-blocking)"
+          else
+            echo "warned=false" >> $GITHUB_OUTPUT
+          fi
+

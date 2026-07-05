@@ -1,0 +1,14 @@
+# Auto-deploy on push to main
+# Uses the org-wide reusable workflow — no config needed
+#
+# Replace {{GITHUB_ORG}} below with your GitHub org/user when scaffolding a
+# new app. setup/render-templates.sh handles this automatically.
+
+name: Deploy
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    uses: {{GITHUB_ORG}}/.github/.github/workflows/deploy.yml@main

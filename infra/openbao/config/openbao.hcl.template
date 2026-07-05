@@ -1,0 +1,27 @@
+ui = true
+
+disable_mlock = true
+
+storage "raft" {
+  path    = "/openbao/data"
+  node_id = "openbao-1"
+}
+
+listener "tcp" {
+  address     = "0.0.0.0:8200"
+  tls_disable = "true"
+}
+
+api_addr     = "http://openbao:8200"
+cluster_addr = "http://openbao:8201"
+
+log_level  = "info"
+log_format = "json"
+
+audit "file" {
+  type = "file"
+  path = "audit-file"
+  options = {
+    file_path = "/openbao/logs/audit/audit.log"
+  }
+}

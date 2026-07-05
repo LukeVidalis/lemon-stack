@@ -1,0 +1,49 @@
+{
+  "_comment": "Claude Code settings template for lemon-stack users. Copied to ~/.claude/settings.json by setup/install-skills.sh. Tweak as you like.",
+  "permissions": {
+    "allow": [
+      "Bash(docker ps:*)",
+      "Bash(docker compose:*)",
+      "Bash(docker logs:*)",
+      "Bash(docker inspect:*)",
+      "Bash(systemctl status:*)",
+      "Bash(systemctl --user status:*)",
+      "Bash(journalctl:*)",
+      "Bash(curl:*)",
+      "Bash(gh:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(lemon:*)",
+      "Bash({{USER_HOME}}/lemon-stack/scripts/*:*)"
+    ],
+    "ask": [
+      "Bash(docker compose down:*)",
+      "Bash(docker compose restart:*)",
+      "Bash(rm:*)",
+      "Bash(systemctl stop:*)",
+      "Bash(systemctl restart:*)",
+      "Bash(git push:*)",
+      "Bash(git reset --hard:*)"
+    ]
+  },
+  "env": {
+    "LEMON_DOMAIN": "{{DOMAIN}}",
+    "LEMON_GITHUB_ORG": "{{GITHUB_ORG}}",
+    "LEMON_ADMIN_EMAIL": "{{ADMIN_EMAIL}}"
+  },
+  "_hooks_comment": "PostToolUse hook enables JSONL trajectory logging for claude-runner sessions. The hook is a no-op when $TRAJECTORY_FILE is unset, so it only fires inside claude-runner handlers. See apps/claude-runner/lib/trajectory-hook.py.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{USER_HOME}}/claude-runner/lib/trajectory-hook.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+[Unit]
+Description=Re-ingest server-maintainer memory index ({{PLANE_PROJECT_PREFIX}}-50)
+After=network.target
+
+[Service]
+Type=oneshot
+User=lemon
+Group=lemon
+WorkingDirectory={{USER_HOME}}
+# Coalesce bursts: pause briefly so a flurry of writes results in one ingest.
+ExecStartPre=/bin/sleep 5
+ExecStart={{USER_HOME}}/bin/lemon memory ingest
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+Environment=PATH={{USER_HOME}}/bin:{{USER_HOME}}/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Keep this quiet in journal unless something fails.
+StandardOutput=null
+StandardError=journal

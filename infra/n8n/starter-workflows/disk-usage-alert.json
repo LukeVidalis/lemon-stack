@@ -1,0 +1,445 @@
+{
+  "name": "Disk Usage Alert",
+  "description": null,
+  "isArchived": false,
+  "nodes": [
+    {
+      "id": "3bda481b-4ebf-467b-94da-a31ce3944dc1",
+      "name": "Every Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "90a84d60-36de-4330-85bf-abf16be8b721",
+      "name": "Get Disk Usage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:10021/cmd",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"command\": \"/disk\"}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "wWCqKaCTkTKBD56d",
+          "name": "server-cmd API"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "2fe99e5f-9fad-449c-a2df-ce7ceec9abbe",
+      "name": "Check Thresholds",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "\nconst output = $input.first().json.output || '';\nconst lines = output.replace(/<\\/?pre>/g, '').trim().split('\\n').slice(1);\nconst over = [];\nfor (const line of lines) {\n  const parts = line.trim().split(/\\s+/);\n  if (parts.length < 6) continue;\n  const useStr = parts[4]; // e.g. \"72%\"\n  const pct = parseInt(useStr);\n  const mount = parts[5];\n  if (!isNaN(pct) && pct >= 80) {\n    over.push({ mount, use: useStr, size: parts[1], avail: parts[3] });\n  }\n}\nconst staticData = $getWorkflowStaticData('global');\nconst key = JSON.stringify(over.map(o => o.mount).sort());\nconst changed = key !== (staticData.lastKey || '');\nstaticData.lastKey = key;\nreturn [{ json: { over, isOver: over.length > 0, changed } }];\n"
+      }
+    },
+    {
+      "id": "0b758ab2-c488-4067-ac6e-7585d2494178",
+      "name": "Over Threshold?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        860,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "18c40e46-68db-4627-8bbb-108d6ece3ff0",
+              "leftValue": "={{ $json.isOver }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "6cce5848-2d79-44d8-8524-33941be2a20e",
+              "leftValue": "={{ $json.changed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "65a43076-5922-43d4-a48f-54ef1ee88a81",
+      "name": "Alert: Disk Full",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1080,
+        200
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://tg-notify:8080/send",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"level\": \"error\", \"title\": \"Disk Usage Warning\", \"message\": \"={{ $json.over.map(o => o.mount + ': ' + o.use + ' used (' + o.avail + ' free)').join('\\\\n') }}\"}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "WLERegIj33Xn9v90",
+          "name": "tg-notify API"
+        }
+      },
+      "onError": "continueErrorOutput"
+    }
+  ],
+  "connections": {
+    "Every Hour": {
+      "main": [
+        [
+          {
+            "node": "Get Disk Usage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Disk Usage": {
+      "main": [
+        [
+          {
+            "node": "Check Thresholds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Thresholds": {
+      "main": [
+        [
+          {
+            "node": "Over Threshold?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Over Threshold?": {
+      "main": [
+        [
+          {
+            "node": "Alert: Disk Full",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": null,
+  "activeVersionId": "80bd80b9-94f4-4ac6-92b3-4e98cf06f3dc",
+  "versionCounter": 399,
+  "activeVersion": {
+    "updatedAt": "2026-05-09T15:34:52.927Z",
+    "createdAt": "2026-05-09T15:34:52.927Z",
+    "versionId": "80bd80b9-94f4-4ac6-92b3-4e98cf06f3dc",
+    "workflowId": "QSY7uLG7Cz4fIbdj",
+    "nodes": [
+      {
+        "id": "3bda481b-4ebf-467b-94da-a31ce3944dc1",
+        "name": "Every Hour",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          200,
+          300
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "hours",
+                "hoursInterval": 1
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "90a84d60-36de-4330-85bf-abf16be8b721",
+        "name": "Get Disk Usage",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          420,
+          300
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://host.docker.internal:10021/cmd",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "options": {
+            "response": {
+              "response": {
+                "responseFormat": "json"
+              }
+            }
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "{\"command\": \"/disk\"}",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "httpHeaderAuth"
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "wWCqKaCTkTKBD56d",
+            "name": "server-cmd API"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "id": "2fe99e5f-9fad-449c-a2df-ce7ceec9abbe",
+        "name": "Check Thresholds",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          640,
+          300
+        ],
+        "parameters": {
+          "mode": "runOnceForAllItems",
+          "jsCode": "\nconst output = $input.first().json.output || '';\nconst lines = output.replace(/<\\/?pre>/g, '').trim().split('\\n').slice(1);\nconst over = [];\nfor (const line of lines) {\n  const parts = line.trim().split(/\\s+/);\n  if (parts.length < 6) continue;\n  const useStr = parts[4]; // e.g. \"72%\"\n  const pct = parseInt(useStr);\n  const mount = parts[5];\n  if (!isNaN(pct) && pct >= 80) {\n    over.push({ mount, use: useStr, size: parts[1], avail: parts[3] });\n  }\n}\nconst staticData = $getWorkflowStaticData('global');\nconst key = JSON.stringify(over.map(o => o.mount).sort());\nconst changed = key !== (staticData.lastKey || '');\nstaticData.lastKey = key;\nreturn [{ json: { over, isOver: over.length > 0, changed } }];\n"
+        }
+      },
+      {
+        "id": "0b758ab2-c488-4067-ac6e-7585d2494178",
+        "name": "Over Threshold?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.2,
+        "position": [
+          860,
+          300
+        ],
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict"
+            },
+            "conditions": [
+              {
+                "id": "18c40e46-68db-4627-8bbb-108d6ece3ff0",
+                "leftValue": "={{ $json.isOver }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals"
+                }
+              },
+              {
+                "id": "6cce5848-2d79-44d8-8524-33941be2a20e",
+                "leftValue": "={{ $json.changed }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          }
+        }
+      },
+      {
+        "id": "65a43076-5922-43d4-a48f-54ef1ee88a81",
+        "name": "Alert: Disk Full",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1080,
+          200
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://tg-notify:8080/send",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "options": {
+            "response": {
+              "response": {
+                "responseFormat": "json"
+              }
+            }
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "{\"level\": \"error\", \"title\": \"Disk Usage Warning\", \"message\": \"={{ $json.over.map(o => o.mount + ': ' + o.use + ' used (' + o.avail + ' free)').join('\\\\n') }}\"}",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "httpHeaderAuth"
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "WLERegIj33Xn9v90",
+            "name": "tg-notify API"
+          }
+        },
+        "onError": "continueErrorOutput"
+      }
+    ],
+    "connections": {
+      "Every Hour": {
+        "main": [
+          [
+            {
+              "node": "Get Disk Usage",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Disk Usage": {
+        "main": [
+          [
+            {
+              "node": "Check Thresholds",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Thresholds": {
+        "main": [
+          [
+            {
+              "node": "Over Threshold?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Over Threshold?": {
+        "main": [
+          [
+            {
+              "node": "Alert: Disk Full",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          []
+        ]
+      }
+    },
+    "authors": "Loukas Vidalis",
+    "name": null,
+    "description": null,
+    "autosaved": false,
+    "workflowPublishHistory": [
+      {
+        "createdAt": "2026-05-09T15:35:08.806Z",
+        "id": 32,
+        "workflowId": "QSY7uLG7Cz4fIbdj",
+        "versionId": "80bd80b9-94f4-4ac6-92b3-4e98cf06f3dc",
+        "event": "activated",
+        "userId": "c2419657-c13d-4a83-adc7-689f6c3d839d"
+      }
+    ]
+  }
+}

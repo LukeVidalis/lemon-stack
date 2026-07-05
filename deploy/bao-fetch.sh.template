@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Fetch secrets for <app> from OpenBao and emit KEY=value lines on stdout.
+#
+# Usage:  bao-fetch.sh <app>
+# Reads AppRole credentials from ~/docker/<app>/.bao-role-id and .bao-secret-id.
+# Exits non-zero if Bao is unreachable, sealed, or auth fails — caller (deploy.sh)
+# then falls back to ~/docker/<app>/secrets.env.
+#
+# Output format: KEY=value, one per line, no quoting. Values are passed through
+# verbatim — escaping for docker-compose interpolation is the caller's job.
+set -euo pipefail
+
+APP="${1:-}"
+[[ -z "$APP" ]] && { echo "usage: $0 <app>" >&2; exit 2; }
+
+BAO_ADDR="${BAO_ADDR:-http://127.0.0.1:8200}"
+APP_DIR="{{USER_HOME}}/docker/$APP"
+ROLE_FILE="$APP_DIR/.bao-role-id"
+SECRET_FILE="$APP_DIR/.bao-secret-id"
+
+[[ -r "$ROLE_FILE" && -r "$SECRET_FILE" ]] || {
+  echo "bao-fetch: no AppRole credentials for $APP" >&2
+  exit 3
+}
+
+# Health check first: sealed OR unreachable -> fail fast so caller can fall back.
+if ! curl -fsS --max-time 3 "$BAO_ADDR/v1/sys/health" >/dev/null 2>&1; then
+  echo "bao-fetch: $BAO_ADDR not healthy" >&2
+  exit 4
+fi
+
+ROLE_ID="$(cat "$ROLE_FILE")"
+SECRET_ID="$(cat "$SECRET_FILE")"
+
+# Login -> client token
+TOKEN="$(curl -fsS --max-time 5 -X POST \
+  -d "{\"role_id\":\"$ROLE_ID\",\"secret_id\":\"$SECRET_ID\"}" \
+  "$BAO_ADDR/v1/auth/approle/login" \
+  | python3 -c "import json,sys;print(json.load(sys.stdin)['auth']['client_token'])")" || {
+  echo "bao-fetch: approle login failed for $APP" >&2
+  exit 5
+}
+
+cleanup() {
+  curl -fsS --max-time 3 -X POST -H "X-Vault-Token: $TOKEN" \
+    "$BAO_ADDR/v1/auth/token/revoke-self" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+# List keys under secret/apps/<app>/
+KEYS_JSON="$(curl -fsS --max-time 5 -H "X-Vault-Token: $TOKEN" \
+  "$BAO_ADDR/v1/secret/metadata/apps/$APP?list=true" 2>/dev/null || true)"
+
+# If the list returns 404 (no keys yet) treat as empty — caller will use fallback.
+KEYS="$(echo "$KEYS_JSON" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    print('\n'.join(d.get('data', {}).get('keys', []) or []))
+except Exception:
+    pass
+")"
+
+[[ -z "$KEYS" ]] && {
+  echo "bao-fetch: no keys at secret/apps/$APP" >&2
+  exit 6
+}
+
+# Emit KEY=value for each leaf
+while IFS= read -r key; do
+  [[ -z "$key" ]] && continue
+  # Skip directories (KV v2 list returns trailing slash for subpaths)
+  [[ "$key" == */ ]] && continue
+  VAL="$(curl -fsS --max-time 5 -H "X-Vault-Token: $TOKEN" \
+    "$BAO_ADDR/v1/secret/data/apps/$APP/$key" \
+    | python3 -c "
+import json, sys
+d = json.load(sys.stdin)['data']['data']
+# Convention: the value lives under the 'value' key; if absent, use the only key.
+if 'value' in d:
+    print(d['value'])
+elif len(d) == 1:
+    print(next(iter(d.values())))
+else:
+    print('', file=sys.stderr)
+    sys.exit(7)
+")"
+  printf '%s=%s\n' "$key" "$VAL"
+done <<< "$KEYS"

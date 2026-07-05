@@ -1,0 +1,41 @@
+services:
+  api:
+    build: ./api
+    ports:
+      - "8080:8080"
+    environment:
+      - AUTHENTIK_URL=http://authentik-server:9000
+      - AUTHENTIK_EXTERNAL_URL=https://auth.{{DOMAIN}}
+      - AUTHENTIK_API_TOKEN=${AUTHENTIK_API_TOKEN}
+      - ADMIN_API_SECRET=${ADMIN_API_SECRET}
+      - INTERNAL_SUMMARY_SECRET=${INTERNAL_SUMMARY_SECRET}
+      - RESEND_API_KEY=${RESEND_API_KEY}
+      - DATABASE_URL=${DATABASE_URL}
+      - ENABLE_IMPERSONATION=${ENABLE_IMPERSONATION:-false}
+    volumes:
+      - {{USER_HOME}}/deploy/ports.json:/data/ports.json:ro
+    networks:
+      - default
+      - authentik
+      - lemon-internal
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      secrets:
+        - github_packages_token
+    ports:
+      - "80:80"
+    restart: unless-stopped
+
+networks:
+  authentik:
+    external: true
+    name: authentik_default
+  lemon-internal:
+    external: true
+
+secrets:
+  github_packages_token:
+    file: {{USER_HOME}}/.github-packages-token

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lemon-cli"
+version = "0.1.0"
+description = "lemon-stack operator CLI — server inspection, Caddy/Authentik/OpenBao helpers"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "lemon-stack contributors" }]
+dependencies = [
+  "requests>=2.31",
+  "PyYAML>=6.0",
+]
+
+[project.scripts]
+lemon = "lemon_cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/LukeVidalis/lemon-stack"
+Repository = "https://github.com/LukeVidalis/lemon-stack"
+
+[tool.setuptools.packages.find]
+include = ["lemon_cli*"]

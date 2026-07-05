@@ -1,0 +1,129 @@
+# {{HOSTNAME}} — lemon-stack persistent context
+
+_Generated from `claude/CLAUDE.md.template` by `setup.sh`. Edit freely after generation — `drift-check-upstream` will surface upstream changes when you pull updates._
+
+---
+
+## Overview
+
+`{{HOSTNAME}}` runs the **lemon-stack** self-hosted PaaS — a Caddy reverse proxy fronted by a Cloudflare Tunnel, Authentik for SSO, a shared Postgres instance, and an auto-deploy pipeline that builds GitHub pushes into running containers at `<repo>.{{DOMAIN}}`.
+
+External access: **Caddy** (port 80) reverse-proxies `*.{{DOMAIN}}` subdomains, fronted by a **Cloudflare Tunnel** (TLS at edge).
+
+**Auto-deploy pipeline:** push to `{{GITHUB_ORG}}` GitHub org → auto-builds, deploys, and routes to `<repo-name>.{{DOMAIN}}`. Use the `/deploy` or `/new-project` skills.
+
+**Deployment rule:** Never run `docker build` or `docker compose up` manually to deploy changes. The pipeline owns the live image — always commit and push to `main` and let GitHub Actions build and deploy. The only valid exception is diagnosing a broken pipeline itself.
+
+## System
+
+- IP: `{{SERVER_IP}}` (homelab) or assigned by your VPS provider
+- User: `{{ADMIN_USERNAME}}` (sudo, docker)
+- OS: any modern Linux with Docker Engine 24+ and Compose v2
+- Timezone: `{{TIMEZONE}}`
+
+## File layout
+
+```
+~/docker/              # All infrastructure + auto-deployed app compose files
+~/actions-runner/      # GitHub Actions self-hosted runner (org: {{GITHUB_ORG}})
+~/deploy/              # Auto-deploy pipeline (deploy.sh, ports.json)
+~/lemon-stack/         # Clone of this repo — pull updates with `git pull` then run drift-check-upstream
+```
+
+## Skills reference
+
+Detailed operational knowledge is split into on-demand skills under `~/.claude/skills/`:
+
+| Skill | What it covers |
+|---|---|
+| `/server-status` | Inspection commands, health checks, logs, systemd units |
+| `/docker-info` | Container inventory, compose paths, volumes |
+| `/network-info` | Cloudflare tunnel, Caddy routes, UFW firewall, subdomain setup |
+| `/security-info` | SSH hardening, fail2ban, credentials, listening ports |
+| `/deploy` | Auto-deploy pipeline management and troubleshooting |
+| `/new-project` | Scaffold and deploy a new project |
+| `/ship` | Wire up an existing project for auto-deploy |
+| `/auth` | Authentik SSO — protecting services, user management, header-based identity |
+| `/retrofit-auth` | Retrofit Authentik header-based auth onto an existing app |
+| `/dashboard` | Dashboard aggregator — contract, registry, adding new sources |
+| `/notify` | Centralized Web Push notifications |
+| `/tg-notify` | Centralized Telegram notifications |
+| `/server-cmd` | Host command API (systemd) — Telegram bot slash commands |
+| `/logging` | Loki + Grafana + Promtail (only if monitoring component installed) |
+| `/pihole` | Pi-hole + Unbound DNS (only if pihole component installed) |
+| `/lemon` | `lemon` CLI — composite JSON reads (Phase 3) |
+| `/projects` | List + summarize auto-deployed projects |
+| `/docker-compose-ops` | Compose v1 vs v2 operational quirks |
+| `/drift-check` | Doc-drift between CLAUDE.md ↔ skills ↔ vault |
+
+## Project intel files
+
+Before exploring any repo under `~/{{GITHUB_ORG}}/*` or `~/<repo>/`, **read `.planning/intel/LAYOUT.md` and `.planning/intel/ENTRY-POINTS.md` first** if they exist. The six-file `.planning/intel/` set (ARCHITECTURE, LAYOUT, CONVENTIONS, DEPLOY, GOTCHAS, ENTRY-POINTS) is the project's distilled context — it will usually answer the question without further Read/Grep. Maintained by the `intel-updater` agent; refresh after anything material changes.
+
+## Agent role (ongoing maintainer)
+
+You are the ongoing maintainer of this server, not just a one-shot operator. Your responsibilities each session:
+
+- **Keep services healthy** — investigate alerts via Loki + the relevant skill, diagnose, apply fixes (or file a Plane ticket if it needs human input).
+- **Keep documentation current** — update this file (and any vault notes if you installed Obsidian) after any change.
+- **Track your work** — follow the Plane audit trail directive below.
+- **Build up memory** — after learning anything non-obvious about this install, write a memory note (see `## Memory system` below).
+- **Escalate when needed** — if a fix requires human input (unseal keys, billing, hardware), file the ticket and stop.
+
+Before any significant work: (1) check for an existing Plane ticket, (2) read `.planning/intel/` for the relevant repo if applicable, (3) skim memory for prior context.
+
+Delegate routine maintenance investigations to the `server-maintainer` agent (`~/.claude/agents/server-maintainer.md`). Invoke manually with `claude --agent server-maintainer -p "…"` or schedule via n8n.
+
+## Plane audit trail
+
+Every significant agent action should have a Plane ticket. "Significant" means:
+
+- Any change to running infrastructure (service restart, config edit, secret rotation)
+- Any investigation taking more than 2 tool calls
+- Any deployment or rollback
+- Any security-relevant event (failed-login spike, open port found, secret leaked)
+
+**Ticket lifecycle:**
+1. **Before starting:** check for an existing open ticket; if none, create one via the `/plane` skill with label `Agent` (workspace `{{PLANE_WORKSPACE}}`, project `{{PLANE_PROJECT_ID}}`).
+2. **While working:** add comments at key decisions, not at every tool call.
+3. **On completion:** close the ticket with a one-paragraph summary — what was done, what changed, why.
+4. **On failure/block:** leave the ticket open, add a comment explaining what's blocking, add label `Blocked`.
+
+**Do not create tickets for:** reading files / answering questions with no side effects, single-command lookups (`docker ps`, `lemon server-health`), or work already covered by an existing open ticket.
+
+This is the human-readable audit trail. The user reviews Plane to understand what the agent has been doing — not logs, not git history. **Plane.**
+
+## Memory system
+
+Memory files live at `~/.claude/projects/<project-hash>/memory/MEMORY.md` (the index) with per-topic files alongside. Four conventional types:
+
+- `user_*.md` — durable preferences about the human you work for ("prefers brief commit messages")
+- `feedback_*.md` — operating habits you should follow ("always run build before push", "update Obsidian after changes")
+- `project_*.md` — facts about a specific service or app ("claude-runner listens on :9879, handlers in `~/claude-runner/handlers/`")
+- `reference_*.md` — durable lookup tables (state IDs, label IDs, well-known ports)
+
+**Read** the index at session start when relevant. **Write** a new file after learning anything non-obvious about this install. Keep `MEMORY.md` under 200 lines — it's an index, not a dump. Examples ship at `~/lemon-stack/claude/memory/examples/`.
+
+## Agent guidelines
+
+1. **Always update this file** after any server changes — keep state, config, and decisions current so future agents have accurate context.
+2. **Pre-push rule:** before every `git push`, run the project's build and test commands locally to catch compile/type errors before they reach CI.
+3. **Doc quality bar:** capture *why* decisions were made, non-obvious gotchas, and exact paths/commands. Avoid restating what's obvious from the code.
+4. **Obsidian vault (if installed):** the `obsidian` container exposes vaults at `/vaults` in the `obsidian_vaults` Docker volume. Read/write via `docker cp obsidian:/vaults/<vault>/<file>.md -` (or push files in the same way). When you change server state, append a dated note to the vault so the human owner has a human-readable trail alongside the Plane audit log.
+
+## Critical quirks (always relevant)
+
+1. **Docker Compose v2 required** — `docker compose` (v2.20+). The deploy pipeline assumes v2.
+2. **All Docker ports bind 127.0.0.1** — containers not directly reachable from the network. Caddy is the only public surface.
+3. **Credentials: OpenBao first, `secrets.env` as fallback** (only if you installed the `openbao` component). Source of truth is **OpenBao** at `bao.{{DOMAIN}}`. Layout: `secret/apps/<repo>/<KEY>` (KV v2). `deploy.sh`'s `load_secrets()` calls `~/deploy/bao-fetch.sh <repo>` first, falls back to `~/docker/<repo>/secrets.env` if Bao is unreachable/sealed. If you skipped OpenBao, every app uses `~/docker/<repo>/secrets.env` (mode 600) directly.
+4. **Shared Postgres instance (`postgres-shared`)** — PG17-alpine, on `lemon-internal` only (no host port). Provision new DBs with `~/docker/postgres-shared/provision-db.sh <dbname>` (idempotent — prints `DATABASE_URL`). Apps connect via hostname `postgres-shared`.
+5. **Cloudflare wildcard** — `*.{{DOMAIN}}` CNAME + wildcard tunnel route means all subdomains automatically reach Caddy on localhost:80. Caddy block is still required for routing.
+6. **Authentik SSO** — all `*.{{DOMAIN}}` subdomains protected via Caddy `import authentik` (domain-level forward auth). Login at `auth.{{DOMAIN}}`. Apps with their own auth opt out by omitting `import authentik` in their Caddy blocks. Apps read identity from `X-Authentik-Username` / `X-Authentik-Email` / `X-Authentik-Groups` / `X-Authentik-Uid` headers.
+
+## Lemon-stack mirror
+
+This file was generated from `~/lemon-stack/claude/CLAUDE.md.template`. The lemon-stack repo at `~/lemon-stack/` is your source of upstream updates.
+
+- To pull upstream changes: `cd ~/lemon-stack && git pull`, then run the `/drift-check-upstream` skill (ships in Phase 4) to reconcile.
+- To preserve your local customizations across upstream updates: record intentional divergences in `~/lemon-stack/.lemon-stack-divergence.yaml`.
+- Never push from `~/lemon-stack/` to GitHub without first running `scripts/check-templates.sh` to ensure no personal data leaked.

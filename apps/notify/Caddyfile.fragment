@@ -1,0 +1,27 @@
+	# /vapid-public-key and /health are public — PWAs must fetch the VAPID key
+	# before subscribing, before any SSO session exists.
+	@public path /vapid-public-key /health
+	handle @public {
+		reverse_proxy localhost:{{API_PORT}}
+	}
+
+	# Authentik outpost — must be reachable for the SSO login flow to work.
+	@goauthentik path /outpost.goauthentik.io/*
+	handle @goauthentik {
+		reverse_proxy localhost:9000 {
+			header_up X-Forwarded-Proto https
+		}
+	}
+
+	# Everything else: require Authentik SSO. /api/_internal/* is never
+	# reachable externally because every external request passes through
+	# forward_auth first, and Caddy never routes that prefix via the tunnel.
+	handle {
+		forward_auth localhost:9000 {
+			uri /outpost.goauthentik.io/auth/caddy
+			copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email X-Authentik-Uid
+			header_up X-Forwarded-Proto https
+			trusted_proxies private_ranges
+		}
+		reverse_proxy localhost:{{API_PORT}}
+	}

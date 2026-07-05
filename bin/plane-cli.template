@@ -1,0 +1,345 @@
+#!/usr/bin/env bash
+# plane-cli — Plane.so CLI for lemon-server
+# Usage: plane-cli [--project lemonserve|cash] <cmd> [args]
+set -euo pipefail
+
+API_KEY=$(awk -F',' 'NR==2{print $4}' ~/secret-key-{{PLANE_API_KEY_FILE_ID}}.csv)
+BASE="https://plane.{{DOMAIN}}/api/v1/workspaces/lemon-server"
+UA="curl/8.5.0"
+
+# Project + state IDs
+PROJ_LS="{{PLANE_PROJECT_ID}}"
+LS_BACKLOG="2ee3bd1f-099c-40d6-aa87-0325687f4368"
+LS_TODO="897788b0-2d97-4899-9751-c7b45a342326"
+LS_INPROG="2c5a246a-3fdb-4c3a-9e60-9b53d72ce36e"
+LS_DONE="62db1238-ee79-42b3-85de-5f73f4a6865a"
+LS_CANCELLED="2d619b39-f9c5-4ce5-80cf-a52da6a1f458"
+
+PROJ_CASH="91625ba9-2a02-4d08-8c84-8d0cc918d98b"
+CASH_BACKLOG="1db47b33-0ff5-4597-ac77-6dcc164fa401"
+CASH_TODO="4747bbc5-40a5-4316-9e8c-c32a03e47807"
+CASH_INPROG="f0c540d2-c068-4777-a5c8-2cad88434dce"
+CASH_DONE="ad1649f8-9a60-41d9-9d02-70cb47cd86ef"
+CASH_CANCELLED="12002914-bd62-4aee-ab0d-834d14a05f8a"
+
+# Shared state name → emoji map (used in Python)
+STATE_MAP='{
+  "2ee3bd1f-099c-40d6-aa87-0325687f4368": "📦 Backlog",
+  "897788b0-2d97-4899-9751-c7b45a342326": "📋 Todo",
+  "2c5a246a-3fdb-4c3a-9e60-9b53d72ce36e": "🔄 In Progress",
+  "62db1238-ee79-42b3-85de-5f73f4a6865a": "✅ Done",
+  "2d619b39-f9c5-4ce5-80cf-a52da6a1f458": "❌ Cancelled",
+  "1db47b33-0ff5-4597-ac77-6dcc164fa401": "📦 Backlog",
+  "4747bbc5-40a5-4316-9e8c-c32a03e47807": "📋 Todo",
+  "f0c540d2-c068-4777-a5c8-2cad88434dce": "🔄 In Progress",
+  "ad1649f8-9a60-41d9-9d02-70cb47cd86ef": "✅ Done",
+  "12002914-bd62-4aee-ab0d-834d14a05f8a": "❌ Cancelled"
+}'
+
+# Parse --project flag anywhere in args
+PROJECT="lemonserve"
+POSITIONAL=()
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --project|-p) PROJECT="$2"; shift 2 ;;
+    *) POSITIONAL+=("$1"); shift ;;
+  esac
+done
+set -- "${POSITIONAL[@]:-}"
+
+case "${PROJECT,,}" in
+  cash)
+    PROJ_ID=$PROJ_CASH
+    S_BACKLOG=$CASH_BACKLOG; S_TODO=$CASH_TODO; S_INPROG=$CASH_INPROG
+    S_DONE=$CASH_DONE; S_CANCELLED=$CASH_CANCELLED
+    PREFIX="CASH"
+    ;;
+  *)
+    PROJ_ID=$PROJ_LS
+    S_BACKLOG=$LS_BACKLOG; S_TODO=$LS_TODO; S_INPROG=$LS_INPROG
+    S_DONE=$LS_DONE; S_CANCELLED=$LS_CANCELLED
+    PREFIX="{{PLANE_PROJECT_PREFIX}}"
+    ;;
+esac
+
+ISSUES_URL="$BASE/projects/$PROJ_ID/issues"
+
+# HTTP helpers
+_get()   { curl -sf -H "X-Api-Key: $API_KEY" -H "User-Agent: $UA" "$@"; }
+_post()  { curl -sf -X POST  -H "X-Api-Key: $API_KEY" -H "Content-Type: application/json" -H "User-Agent: $UA" "$@"; }
+_patch() { curl -sf -X PATCH -H "X-Api-Key: $API_KEY" -H "Content-Type: application/json" -H "User-Agent: $UA" "$@"; }
+
+# JSON-encode a string
+json_str() { python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$1"; }
+
+# Resolve state name → UUID (falls through to raw UUID if unknown)
+resolve_state() {
+  case "${1,,}" in
+    done|complete|completed)  echo "$S_DONE" ;;
+    inprog|in-progress|progress|started) echo "$S_INPROG" ;;
+    todo|to-do)               echo "$S_TODO" ;;
+    backlog|back)             echo "$S_BACKLOG" ;;
+    cancel|cancelled)         echo "$S_CANCELLED" ;;
+    *)                        echo "$1" ;;
+  esac
+}
+
+# Fetch all issues as JSON array
+fetch_all() {
+  _get "$ISSUES_URL/?per_page=100" \
+    | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps(d.get('results',d) if isinstance(d,dict) else d))"
+}
+
+# Resolve sequence ID → UUID (exits 1 if not found)
+seq_to_uuid() {
+  local seq="$1"
+  fetch_all | python3 -c "
+import json,sys
+issues=json.load(sys.stdin)
+m=[i for i in issues if str(i['sequence_id'])=='$seq']
+if m: print(m[0]['id'])
+else: sys.stderr.write('Issue $seq not found\n'); sys.exit(1)
+"
+}
+
+# Get or create the 'claude' label, print its ID
+ensure_claude_label() {
+  local id
+  id=$(_get "$BASE/projects/$PROJ_ID/labels/" \
+    | python3 -c "
+import json,sys
+ls=json.load(sys.stdin).get('results',[])
+m=[l for l in ls if l['name'].lower()=='claude']
+if m: print(m[0]['id'])
+" 2>/dev/null || true)
+  if [[ -z "$id" ]]; then
+    id=$(_post "$BASE/projects/$PROJ_ID/labels/" \
+      -d '{"name":"claude","color":"#9B59B6"}' \
+      | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+  fi
+  echo "$id"
+}
+
+CMD="${1:-help}"; shift || true
+
+case "$CMD" in
+
+  # ── List ──────────────────────────────────────────────────────────
+  list)
+    FILTER="${1:-}"
+    fetch_all | python3 -c "
+import json,sys
+issues=json.load(sys.stdin)
+f='$FILTER'.lower()
+sm=$STATE_MAP
+for i in sorted(issues, key=lambda x: x.get('sequence_id',0)):
+    label=sm.get(i['state'],'?')
+    if not f or f in label.lower() or f==i['state']:
+        print(f\"[$PREFIX-{i['sequence_id']}] {label} {i['name']}\")
+"
+    ;;
+
+  # ── Search ────────────────────────────────────────────────────────
+  search)
+    QUERY="${1:-}"
+    fetch_all | python3 -c "
+import json,sys
+issues=json.load(sys.stdin)
+q='$QUERY'.lower()
+sm=$STATE_MAP
+for i in issues:
+    if q in i['name'].lower():
+        print(f\"[$PREFIX-{i['sequence_id']}] [{i['id']}] {sm.get(i['state'],'?')} {i['name']}\")
+"
+    ;;
+
+  # ── Get single issue ──────────────────────────────────────────────
+  get)
+    SEQ="${1:?seq required}"
+    fetch_all | python3 -c "
+import json,sys
+issues=json.load(sys.stdin)
+m=[i for i in issues if str(i['sequence_id'])=='$SEQ']
+if not m: print('Not found'); sys.exit(1)
+i=m[0]
+sm=$STATE_MAP
+print(f\"[$PREFIX-{i['sequence_id']}] {i['name']}\")
+print(f\"State:    {sm.get(i['state'], i['state'])}\")
+print(f\"UUID:     {i['id']}\")
+print(f\"Priority: {i.get('priority','none')}\")
+print(f\"Updated:  {i.get('updated_at','')[:10]}\")
+"
+    ;;
+
+  # ── Create ────────────────────────────────────────────────────────
+  create)
+    TITLE="${1:?title required}"
+    STATE_ID=$(resolve_state "${2:-todo}")
+    _post "$ISSUES_URL/" \
+      -d "{\"name\": $(json_str "$TITLE"), \"state\": \"$STATE_ID\", \"priority\": \"none\"}" \
+      | python3 -c "import json,sys; i=json.load(sys.stdin); print(f\"Created [$PREFIX-{i['sequence_id']}] {i['name']}\")"
+    ;;
+
+  # ── Change state ──────────────────────────────────────────────────
+  state)
+    SEQ="${1:?seq required}"
+    NEW_STATE=$(resolve_state "${2:?state required}")
+    UUID=$(seq_to_uuid "$SEQ")
+    _patch "$ISSUES_URL/$UUID/" -d "{\"state\": \"$NEW_STATE\"}" \
+      | python3 -c "import json,sys; i=json.load(sys.stdin); print(f\"[$PREFIX-{i['sequence_id']}] state updated\")"
+    ;;
+
+  # ── Comment ───────────────────────────────────────────────────────
+  comment)
+    SEQ="${1:?seq required}"
+    TEXT="${2:?text required}"
+    UUID=$(seq_to_uuid "$SEQ")
+    _post "$ISSUES_URL/$UUID/comments/" \
+      -d "{\"comment_html\": $(json_str "<p>$TEXT</p>")}" \
+      | python3 -c "import json,sys; c=json.load(sys.stdin); print(f\"Comment posted on $PREFIX-$SEQ\")"
+    ;;
+
+  # ── Labels ────────────────────────────────────────────────────────
+  labels)
+    _get "$BASE/projects/$PROJ_ID/labels/" \
+      | python3 -c "
+import json,sys
+for l in json.load(sys.stdin).get('results',[]):
+    print(f\"{l['id']}  {l['name']}  {l.get('color','')}\")
+"
+    ;;
+
+  # ── HIGH-LEVEL WORKFLOW ───────────────────────────────────────────
+
+  # start: search/create → In Progress → claude label
+  start)
+    TITLE="${1:?title required}"
+    EXISTING=$(fetch_all | python3 -c "
+import json,sys
+issues=json.load(sys.stdin)
+q='$TITLE'.lower()
+done_states={'$S_DONE','$S_CANCELLED'}
+m=[i for i in issues if q in i['name'].lower() and i['state'] not in done_states]
+if m: print(m[0]['id']+'|'+str(m[0]['sequence_id'])+'|'+m[0]['name'])
+" || true)
+    if [[ -n "$EXISTING" ]]; then
+      UUID=$(cut -d'|' -f1 <<< "$EXISTING")
+      SEQ=$(cut -d'|' -f2 <<< "$EXISTING")
+      FOUND=$(cut -d'|' -f3- <<< "$EXISTING")
+      echo "Found [$PREFIX-$SEQ] $FOUND"
+    else
+      RESULT=$(_post "$ISSUES_URL/" \
+        -d "{\"name\": $(json_str "$TITLE"), \"state\": \"$S_TODO\", \"priority\": \"none\"}")
+      UUID=$(python3 -c "import json,sys; print(json.load(sys.stdin)['id'])" <<< "$RESULT")
+      SEQ=$(python3 -c "import json,sys; print(json.load(sys.stdin)['sequence_id'])" <<< "$RESULT")
+      echo "Created [$PREFIX-$SEQ] $TITLE"
+    fi
+    _patch "$ISSUES_URL/$UUID/" -d "{\"state\": \"$S_INPROG\"}" >/dev/null
+    CLAUDE_LABEL=$(ensure_claude_label)
+    _patch "$ISSUES_URL/$UUID/" -d "{\"label_ids\": [\"$CLAUDE_LABEL\"]}" >/dev/null
+    echo "[$PREFIX-$SEQ] → 🔄 In Progress + claude label applied"
+    ;;
+
+  # done: move to Done by seq or fuzzy title
+  done|complete)
+    ARG="${1:?seq or title required}"
+    if [[ "$ARG" =~ ^[0-9]+$ ]]; then
+      UUID=$(seq_to_uuid "$ARG")
+      SEQ="$ARG"
+    else
+      EXISTING=$(fetch_all | python3 -c "
+import json,sys
+issues=json.load(sys.stdin)
+q='$ARG'.lower()
+m=[i for i in issues if q in i['name'].lower()]
+if m: print(m[0]['id']+'|'+str(m[0]['sequence_id']))
+")
+      [[ -z "$EXISTING" ]] && { echo "No matching issue found for: $ARG"; exit 1; }
+      UUID=$(cut -d'|' -f1 <<< "$EXISTING")
+      SEQ=$(cut -d'|' -f2 <<< "$EXISTING")
+    fi
+    _patch "$ISSUES_URL/$UUID/" -d "{\"state\": \"$S_DONE\"}" >/dev/null
+    echo "[$PREFIX-$SEQ] → ✅ Done"
+    ;;
+
+  # today: done today + in-progress
+  today)
+    TODAY=$(date -u +%Y-%m-%d)
+    fetch_all | python3 -c "
+import json,sys
+issues=json.load(sys.stdin)
+today,s_done,s_inprog,prefix='$TODAY','$S_DONE','$S_INPROG','$PREFIX'
+done=[i for i in issues if i['state']==s_done and i.get('updated_at','').startswith(today)]
+inprog=[i for i in issues if i['state']==s_inprog]
+print('✅ Done today:')
+[print(f\"  [{prefix}-{i['sequence_id']}] {i['name']}\") for i in done] or print('  (none)')
+print('🔄 In Progress:')
+[print(f\"  [{prefix}-{i['sequence_id']}] {i['name']}\") for i in inprog] or print('  (none)')
+"
+    ;;
+
+  # recap: in-progress, recent done, todo, backlog
+  recap|status)
+    fetch_all | python3 -c "
+import json,sys
+issues=json.load(sys.stdin)
+s_inprog,s_done,s_todo,s_backlog,prefix='$S_INPROG','$S_DONE','$S_TODO','$S_BACKLOG','$PREFIX'
+inprog=[i for i in issues if i['state']==s_inprog]
+done=sorted([i for i in issues if i['state']==s_done],key=lambda x:x.get('updated_at',''),reverse=True)[:5]
+todo=[i for i in issues if i['state']==s_todo]
+backlog=[i for i in issues if i['state']==s_backlog]
+print('🔄 In Progress:')
+[print(f\"  [{prefix}-{i['sequence_id']}] {i['name']}\") for i in inprog] or print('  (none)')
+print(f'\n✅ Recently Done (last {len(done)}):')
+[print(f\"  [{prefix}-{i['sequence_id']}] {i['name']}\") for i in done] or print('  (none)')
+print(f'\n📋 Todo ({len(todo)}):')
+[print(f\"  [{prefix}-{i['sequence_id']}] {i['name']}\") for i in todo] or print('  (none)')
+print(f'\n📦 Backlog ({len(backlog)}):')
+[print(f\"  [{prefix}-{i['sequence_id']}] {i['name']}\") for i in backlog[:5]]
+len(backlog)>5 and print(f'  ... +{len(backlog)-5} more')
+"
+    ;;
+
+  # close-with-comment: post PR link comment + move to Done
+  close-with-comment)
+    SEQ="${1:?seq required}"; shift
+    PR_URL="${1:?pr_url required}"; shift
+    UUID=$(seq_to_uuid "$SEQ")
+    BULLETS=""
+    for b in "$@"; do BULLETS+="<li>$b</li>"; done
+    HTML="<p>✅ Completed in PR: <a href=\"$PR_URL\">$PR_URL</a></p><p><strong>What changed:</strong></p><ul>$BULLETS</ul>"
+    _post "$ISSUES_URL/$UUID/comments/" \
+      -d "{\"comment_html\": $(json_str "$HTML")}" >/dev/null
+    _patch "$ISSUES_URL/$UUID/" -d "{\"state\": \"$S_DONE\"}" >/dev/null
+    echo "[$PREFIX-$SEQ] → ✅ Done + PR comment posted"
+    ;;
+
+  # ── Help ──────────────────────────────────────────────────────────
+  help|--help|-h)
+    cat <<'HELP'
+plane-cli — Plane.so CLI  (default project: {{PLANE_PROJECT_PREFIX}}; pass --project cash for CASH)
+
+Workflow (high-level):
+  start <title>                    Search/create issue → In Progress + claude label
+  done <seq|title>                 Move issue → Done
+  today                            Done today + in-progress summary
+  recap                            Full board: in-progress / recent done / todo / backlog
+  close-with-comment <seq> <pr_url> <bullet...>
+                                   Post PR link comment + move to Done
+
+Low-level:
+  list [filter]                    List issues (filter: backlog/todo/inprog/done)
+  search <query>                   Search by title
+  get <seq>                        Get issue details
+  create <title> [state]           Create issue (state: todo/backlog, default: todo)
+  state <seq> <state>              Change state (done/inprog/todo/backlog/cancel)
+  comment <seq> <text>             Add plain-text comment
+  labels                           List all project labels with IDs
+HELP
+    ;;
+
+  *)
+    echo "Unknown command: $CMD. Run 'plane-cli help'." >&2
+    exit 1
+    ;;
+esac

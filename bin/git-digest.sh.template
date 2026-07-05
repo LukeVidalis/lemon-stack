@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# git-digest.sh — morning git status digest across all {{GITHUB_ORG}} repos.
+# Sends a tg-notify message if anything needs attention.
+# Filters out: renovate/dependabot/intel/changeset branches, secrets files, build artifacts.
+
+set -euo pipefail
+
+SECRET_FILE="$HOME/docker/tg-notify/secrets.env"
+TG_URL="http://127.0.0.1:10020/send"
+
+# Repos to scan (explicit list — add new projects here)
+REPOS=(
+  {{USER_HOME}}/admin-ui
+  {{USER_HOME}}/cashflow
+  {{USER_HOME}}/docker/truelayer2actual
+  {{USER_HOME}}/dotnet-api-template
+  {{USER_HOME}}/financial-planner
+  {{USER_HOME}}/food-planner
+  {{USER_HOME}}/food-splitter
+  {{USER_HOME}}/friendly
+  {{USER_HOME}}/households-svc
+  {{USER_HOME}}/insilicoscreen
+  {{USER_HOME}}/knowledgebase
+  {{USER_HOME}}/lemon-cli
+  {{USER_HOME}}/lemon-packages
+  {{USER_HOME}}/lemon-stack
+  {{USER_HOME}}/login-portal
+  {{USER_HOME}}/macros
+  {{USER_HOME}}/notify-service
+  {{USER_HOME}}/poker-copilot
+  {{USER_HOME}}/react-app-template
+  {{USER_HOME}}/risk-calculator
+  {{USER_HOME}}/server-cmd
+)
+
+# Branch name patterns treated as automated noise (grep -E)
+# Note: no ^ anchor — git branch -r output has leading whitespace
+NOISE_BRANCHES="origin/(renovate/|dependabot/|intel/|changeset-release/)"
+
+# Untracked path patterns to ignore (grep -E on git status --short output)
+NOISE_UNTRACKED='secrets\.env$|\.bao-role-id$|\.bao-secret-id$|/bin/$|/obj/$|^.. \.claude/'
+
+lines=()
+
+for repo in "${REPOS[@]}"; do
+  [[ ! -d "$repo/.git" ]] && continue
+  name=$(basename "$repo")
+  cd "$repo" || continue
+
+  # Uncommitted tracked changes (M/A/D/R) and meaningful untracked files
+  dirty=$(git status --short 2>/dev/null \
+    | grep -vE "$NOISE_UNTRACKED" \
+    | grep -vE "^\?\? " \
+    | head -5 || true)
+
+  # Untracked files that aren't noise (e.g. .claude/ dir in a project root)
+  untracked=$(git status --short 2>/dev/null \
+    | grep "^\?\? " \
+    | grep -vE "$NOISE_UNTRACKED" \
+    | head -3 || true)
+
+  # Unpushed commits on current branch
+  ahead=0
+  ahead=$(git rev-list @{u}..HEAD 2>/dev/null | wc -l | tr -d ' ') || true
+
+  # Active (non-automated) remote branches
+  active_branches=$(git branch -r 2>/dev/null \
+    | grep -v "origin/HEAD" \
+    | grep -vE "origin/(main|master)$" \
+    | grep -vE "$NOISE_BRANCHES" \
+    | wc -l | tr -d ' ' || true)
+
+  # Current branch — flag if not on main/master
+  branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+  off_main=""
+  [[ "$branch" != "main" && "$branch" != "master" ]] && off_main="$branch"
+
+  # Build the line only if there's something to report
+  parts=()
+  [[ -n "$off_main" ]]    && parts+=("on $off_main")
+  [[ -n "$dirty" ]]       && parts+=("uncommitted changes")
+  [[ -n "$untracked" ]]   && parts+=("untracked files")
+  if [[ "$ahead" -gt 0 ]]; then
+    [[ "$ahead" -gt 1 ]] && parts+=("$ahead unpushed commits") || parts+=("$ahead unpushed commit")
+  fi
+  if [[ "$active_branches" -gt 0 ]]; then
+    [[ "$active_branches" -gt 1 ]] && parts+=("$active_branches open branches") || parts+=("$active_branches open branch")
+  fi
+
+  if [[ ${#parts[@]} -gt 0 ]]; then
+    IFS=", "; detail="${parts[*]}"; IFS=$' \t\n'
+    lines+=("$name — $detail")
+  fi
+done
+
+# Nothing to report — exit silently
+[[ ${#lines[@]} -eq 0 ]] && exit 0
+
+message=$(printf '%s\n' "${lines[@]}")
+count=${#lines[@]}
+if [[ "$count" -gt 1 ]]; then
+  summary="$count repos need attention"
+else
+  summary="$count repo needs attention"
+fi
+
+[[ -r "$SECRET_FILE" ]] || { echo "git-digest: cannot read $SECRET_FILE" >&2; exit 1; }
+API_SECRET="$(grep '^API_SECRET=' "$SECRET_FILE" | cut -d= -f2-)"
+
+# HTML-escape message content (tg-notify sends with parse_mode: HTML)
+payload=$(python3 -c "
+import json, sys, html
+title = sys.argv[1]
+summary = sys.argv[2]
+raw = sys.argv[3]
+escaped = html.escape(raw)
+print(json.dumps({'title': title, 'message': summary + '\n\n' + escaped, 'level': 'info'}))
+" "Git Digest" "$summary" "$message")
+
+curl -sf -X POST "$TG_URL" \
+  -H "Authorization: Bearer $API_SECRET" \
+  -H "Content-Type: application/json" \
+  -d "$payload" \
+  > /dev/null 2>&1 || { echo "git-digest: tg-notify send failed" >&2; exit 1; }
+
+echo "git-digest: sent ($count items)"

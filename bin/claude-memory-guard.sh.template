@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SWAP_THRESHOLD_PCT="${SWAP_THRESHOLD_PCT:-80}"
+MIN_AVAILABLE_MIB="${MIN_AVAILABLE_MIB:-1024}"
+WAITING_STALE_MINUTES="${WAITING_STALE_MINUTES:-30}"
+IDLE_STALE_MINUTES="${IDLE_STALE_MINUTES:-120}"
+SESSION_DIR="${SESSION_DIR:-$HOME/.claude/sessions}"
+TG_SECRETS="${TG_SECRETS:-$HOME/docker/tg-notify/secrets.env}"
+TG_NOTIFY_URL="${TG_NOTIFY_URL:-http://127.0.0.1:10020/send}"
+
+is_memory_pressure() {
+  local swap_pct="$1"
+  local available_mib="$2"
+  if (( swap_pct >= SWAP_THRESHOLD_PCT || available_mib <= MIN_AVAILABLE_MIB )); then
+    echo "yes"
+  else
+    echo "no"
+  fi
+}
+
+session_age_minutes() {
+  local now_ms="$1"
+  local updated_at_ms="$2"
+  if (( updated_at_ms <= 0 || now_ms <= updated_at_ms )); then
+    echo 0
+    return
+  fi
+  echo $(((now_ms - updated_at_ms) / 60000))
+}
+
+classify_killable_session() {
+  local session_json="$1"
+  local now_ms="$2"
+  local status waiting_for updated_at age_minutes
+
+  status="$(jq -r '.status // ""' <<<"$session_json")"
+  waiting_for="$(jq -r '.waitingFor // ""' <<<"$session_json")"
+  updated_at="$(jq -r '.updatedAt // 0' <<<"$session_json")"
+  age_minutes="$(session_age_minutes "$now_ms" "$updated_at")"
+
+  if [[ "$status" == "waiting" && "$waiting_for" == "permission prompt" ]] && (( age_minutes >= WAITING_STALE_MINUTES )); then
+    echo "waiting-permission-prompt"
+    return
+  fi
+
+  if [[ "$status" == "idle" ]] && (( age_minutes >= IDLE_STALE_MINUTES )); then
+    echo "idle"
+    return
+  fi
+}
+
+collect_killable_sessions() {
+  local session_dir="$1"
+  local now_ms="$2"
+  local pressure="$3"
+  local file session_json reason age_minutes
+
+  if [[ "$pressure" != "yes" || ! -d "$session_dir" ]]; then
+    return 0
+  fi
+
+  shopt -s nullglob
+  for file in "$session_dir"/*.json; do
+    session_json="$(jq -c . "$file" 2>/dev/null || true)"
+    [[ -n "$session_json" ]] || continue
+
+    reason="$(classify_killable_session "$session_json" "$now_ms")"
+    [[ -n "$reason" ]] || continue
+
+    age_minutes="$(session_age_minutes "$now_ms" "$(jq -r '.updatedAt // 0' <<<"$session_json")")"
+    jq -cn \
+      --argjson session "$session_json" \
+      --arg reason "$reason" \
+      --argjson ageMinutes "$age_minutes" \
+      '$session + {killReason: $reason, ageMinutes: $ageMinutes}'
+  done
+  shopt -u nullglob
+}
+
+build_notify_curl_args() {
+  local api_secret="$1"
+  local payload="$2"
+  printf '%s' "curl -sf -X POST $TG_NOTIFY_URL -H Authorization: Bearer $api_secret -H Content-Type: application/json -d $payload"
+}
+
+send_tg_notify() {
+  local level="$1"
+  local title="$2"
+  local message="$3"
+  local api_secret payload
+
+  [[ -f "$TG_SECRETS" ]] || return 0
+  api_secret="$(grep '^API_SECRET=' "$TG_SECRETS" | cut -d= -f2-)"
+  [[ -n "$api_secret" ]] || return 0
+
+  payload="$(jq -cn --arg level "$level" --arg title "$title" --arg message "$message" \
+    '{level:$level, title:$title, message:$message}')"
+
+  curl -sf -X POST "$TG_NOTIFY_URL" \
+    -H "Authorization: Bearer $api_secret" \
+    -H "Content-Type: application/json" \
+    -d "$payload" >/dev/null || true
+}
+
+current_swap_pct() {
+  local swap_total swap_used
+  swap_total="$(free -m | awk '/^Swap:/ {print $2}')"
+  swap_used="$(free -m | awk '/^Swap:/ {print $3}')"
+  if [[ -z "$swap_total" || "$swap_total" == "0" ]]; then
+    echo 0
+    return
+  fi
+  echo $((swap_used * 100 / swap_total))
+}
+
+current_available_mib() {
+  free -m | awk '/^Mem:/ {print $7}'
+}
+
+pid_is_claude() {
+  local pid="$1"
+  local comm cmdline
+
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+
+  comm="$(cat "/proc/$pid/comm" 2>/dev/null || true)"
+  cmdline="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+
+  [[ "$comm" == *claude* || "$cmdline" == *claude* ]]
+}
+
+terminate_pid() {
+  local pid="$1"
+  kill -TERM "$pid" 2>/dev/null || return 1
+  sleep 1
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+}
+
+main() {
+  local swap_pct available_mib pressure now_ms
+  local -a matches=()
+  local entry pid reason age_minutes killed_count skipped_count
+  local summary_lines=()
+
+  swap_pct="$(current_swap_pct)"
+  available_mib="$(current_available_mib)"
+  pressure="$(is_memory_pressure "$swap_pct" "$available_mib")"
+
+  if [[ "$pressure" != "yes" ]]; then
+    echo "memory pressure inactive: swap=${swap_pct}% avail=${available_mib}MiB"
+    return 0
+  fi
+
+  now_ms="$(( $(date +%s) * 1000 ))"
+  mapfile -t matches < <(collect_killable_sessions "$SESSION_DIR" "$now_ms" "$pressure")
+
+  killed_count=0
+  skipped_count=0
+  for entry in "${matches[@]}"; do
+    pid="$(jq -r '.pid // 0' <<<"$entry")"
+    reason="$(jq -r '.killReason // "unknown"' <<<"$entry")"
+    age_minutes="$(jq -r '.ageMinutes // 0' <<<"$entry")"
+
+    if pid_is_claude "$pid"; then
+      terminate_pid "$pid" || true
+      killed_count=$((killed_count + 1))
+      summary_lines+=("killed pid=$pid reason=$reason age=${age_minutes}m")
+    else
+      skipped_count=$((skipped_count + 1))
+      summary_lines+=("skipped pid=$pid reason=$reason stale=${age_minutes}m")
+    fi
+  done
+
+  if (( killed_count > 0 || skipped_count > 0 )); then
+    printf '%s\n' "${summary_lines[@]}"
+    send_tg_notify \
+      "warning" \
+      "Claude memory pressure guard" \
+      "Pressure active: swap=${swap_pct}% avail=${available_mib}MiB; killed=${killed_count}; skipped=${skipped_count}."
+  else
+    echo "memory pressure active but no stale Claude sessions matched: swap=${swap_pct}% avail=${available_mib}MiB"
+    send_tg_notify \
+      "warning" \
+      "Host memory pressure" \
+      "Pressure active: swap=${swap_pct}% avail=${available_mib}MiB; no stale Claude sessions matched."
+  fi
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

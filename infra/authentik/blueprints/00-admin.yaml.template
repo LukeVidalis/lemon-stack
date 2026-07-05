@@ -1,0 +1,28 @@
+# Authentik blueprint: bootstrap admin user + default tenant branding.
+# Applied automatically by Authentik on every worker startup. Idempotent.
+# Reference: https://docs.goauthentik.io/docs/customize/blueprints
+
+version: 1
+metadata:
+  name: lemon-stack bootstrap admin
+entries:
+  - model: authentik_core.user
+    identifiers:
+      username: admin
+    attrs:
+      name: Administrator
+      email: {{ADMIN_EMAIL}}
+      is_active: true
+      type: internal
+      attributes:
+        settings:
+          locale: en
+
+  - model: authentik_core.token
+    identifiers:
+      identifier: lemon-stack-bootstrap-api-token
+    attrs:
+      intent: api
+      user: !KeyOf admin
+      expiring: false
+      description: "Bootstrap API token used by setup.sh for blueprint follow-ups"

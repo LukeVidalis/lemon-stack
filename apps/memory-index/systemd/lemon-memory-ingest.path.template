@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch memory + trajectory dirs to trigger memory re-ingest ({{PLANE_PROJECT_PREFIX}}-50)
+
+[Path]
+PathModified={{USER_HOME}}/claude-runner/logs/trajectories
+PathModified={{USER_HOME}}/.claude/projects/-home-lemon/memory
+Unit=lemon-memory-ingest.service
+
+[Install]
+WantedBy=multi-user.target

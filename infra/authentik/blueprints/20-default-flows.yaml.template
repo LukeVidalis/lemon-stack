@@ -1,0 +1,47 @@
+version: 1
+metadata:
+  name: lemon-stack default flows
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+context:
+  domain: "{{DOMAIN}}"
+entries:
+  # Default authorisation flow used by the Caddy/proxy outpost
+  - model: authentik_flows.flow
+    identifiers:
+      slug: default-provider-authorization-implicit-consent
+    attrs:
+      name: "Authorize Application"
+      title: "Authorize {app}"
+      designation: authorization
+      authentication: require_authenticated
+
+  # Default authentication flow (username + password)
+  - model: authentik_flows.flow
+    identifiers:
+      slug: default-authentication-flow
+    attrs:
+      name: "Welcome to {{DOMAIN}}"
+      title: "Sign in"
+      designation: authentication
+      authentication: none
+
+  # Default invalidation flow (sign-out)
+  - model: authentik_flows.flow
+    identifiers:
+      slug: default-invalidation-flow
+    attrs:
+      name: "Sign out"
+      title: "You have been signed out."
+      designation: invalidation
+      authentication: none
+
+  # Default user-settings flow
+  - model: authentik_flows.flow
+    identifiers:
+      slug: default-user-settings-flow
+    attrs:
+      name: "User Settings"
+      title: "Update your account"
+      designation: stage_configuration
+      authentication: require_authenticated

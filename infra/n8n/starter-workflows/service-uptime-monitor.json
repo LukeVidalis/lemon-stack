@@ -1,0 +1,503 @@
+{
+  "name": "Service Uptime Monitor",
+  "description": null,
+  "isArchived": false,
+  "nodes": [
+    {
+      "id": "aa52e37e-c12e-44e9-8c94-42781dc2d4eb",
+      "name": "Every 5 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "630dd0c7-8dce-4f71-9740-d1c4aa671a29",
+      "name": "Check Services",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "\nconst services = [\n  'https://ha.{{DOMAIN}}',\n  'https://food-planner.{{DOMAIN}}',\n  'https://food-splitter.{{DOMAIN}}',\n  'https://financial-planner.{{DOMAIN}}',\n  'https://macros.{{DOMAIN}}',\n  'https://flashcards.{{DOMAIN}}',\n  'https://friendly.{{DOMAIN}}',\n  'https://dashboard.{{DOMAIN}}',\n  'https://n8n.{{DOMAIN}}',\n  'https://plane.{{DOMAIN}}',\n  'https://photos.{{DOMAIN}}',\n  'https://location.{{DOMAIN}}',\n];\n\nconst results = await Promise.all(services.map(async url => {\n  try {\n    const res = await fetch(url, {\n      method: 'GET',\n      redirect: 'manual',\n      signal: AbortSignal.timeout(10000),\n    });\n    const ok = res.status < 500;\n    return { url, status: res.status, ok };\n  } catch(e) {\n    return { url, status: 0, ok: false, error: e.message };\n  }\n}));\n\nconst down = results.filter(r => !r.ok);\nconst staticData = $getWorkflowStaticData('global');\nconst currentKey = JSON.stringify(down.map(d => d.url).sort());\nconst lastKey = staticData.lastDownSet || '';\nconst changed = currentKey !== lastKey;\nstaticData.lastDownSet = currentKey;\n\nconst wasDown = lastKey !== '[]' && lastKey !== '';\nconst nowDown = down.length > 0;\n\nreturn [{ json: { down, changed, nowDown, wasDown, count: down.length } }];\n"
+      }
+    },
+    {
+      "id": "4d919a80-8cdc-42fb-baf2-e2817c1ad1ce",
+      "name": "State Changed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        640,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "4be98a39-0c5a-44b9-bc23-5d00d2f5b652",
+              "leftValue": "={{ $json.changed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "99d89601-03f4-43e1-8cb7-ceee67cab48a",
+      "name": "Services Down?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        860,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "09e44d27-a8c5-49ae-a5d9-6cd769c29e64",
+              "leftValue": "={{ $json.nowDown }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "2574e3a5-14ad-45b5-9acc-5c9f9db8f860",
+      "name": "Alert: Down",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1080,
+        100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://tg-notify:8080/send",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"level\": \"error\", \"title\": \"Service Down\", \"message\": \"={{ $json.down.map(d => d.url.replace('https://','') + ' (' + d.status + ')').join('\\\\n') }}\"}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "WLERegIj33Xn9v90",
+          "name": "tg-notify API"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "ed216769-a964-4ce8-9e5c-814599a62008",
+      "name": "Alert: Recovered",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1080,
+        340
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://tg-notify:8080/send",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"level\": \"success\", \"title\": \"Services Recovered\", \"message\": \"All monitored services are back online.\"}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "WLERegIj33Xn9v90",
+          "name": "tg-notify API"
+        }
+      },
+      "onError": "continueErrorOutput"
+    }
+  ],
+  "connections": {
+    "Every 5 min": {
+      "main": [
+        [
+          {
+            "node": "Check Services",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Services": {
+      "main": [
+        [
+          {
+            "node": "State Changed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "State Changed?": {
+      "main": [
+        [
+          {
+            "node": "Services Down?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Services Down?": {
+      "main": [
+        [
+          {
+            "node": "Alert: Down",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Alert: Recovered",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": null,
+  "activeVersionId": "9787b0a0-b2d0-40ae-8c78-f492fdbe3a93",
+  "versionCounter": 4606,
+  "activeVersion": {
+    "updatedAt": "2026-05-09T15:34:52.885Z",
+    "createdAt": "2026-05-09T15:34:52.885Z",
+    "versionId": "9787b0a0-b2d0-40ae-8c78-f492fdbe3a93",
+    "workflowId": "8rhIO2qQrikEtSRC",
+    "nodes": [
+      {
+        "id": "aa52e37e-c12e-44e9-8c94-42781dc2d4eb",
+        "name": "Every 5 min",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          200,
+          300
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "minutes",
+                "minutesInterval": 5
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "630dd0c7-8dce-4f71-9740-d1c4aa671a29",
+        "name": "Check Services",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          420,
+          300
+        ],
+        "parameters": {
+          "mode": "runOnceForAllItems",
+          "jsCode": "\nconst services = [\n  'https://ha.{{DOMAIN}}',\n  'https://food-planner.{{DOMAIN}}',\n  'https://food-splitter.{{DOMAIN}}',\n  'https://financial-planner.{{DOMAIN}}',\n  'https://macros.{{DOMAIN}}',\n  'https://flashcards.{{DOMAIN}}',\n  'https://friendly.{{DOMAIN}}',\n  'https://dashboard.{{DOMAIN}}',\n  'https://n8n.{{DOMAIN}}',\n  'https://plane.{{DOMAIN}}',\n  'https://photos.{{DOMAIN}}',\n  'https://location.{{DOMAIN}}',\n];\n\nconst results = await Promise.all(services.map(async url => {\n  try {\n    const res = await fetch(url, {\n      method: 'GET',\n      redirect: 'manual',\n      signal: AbortSignal.timeout(10000),\n    });\n    const ok = res.status < 500;\n    return { url, status: res.status, ok };\n  } catch(e) {\n    return { url, status: 0, ok: false, error: e.message };\n  }\n}));\n\nconst down = results.filter(r => !r.ok);\nconst staticData = $getWorkflowStaticData('global');\nconst currentKey = JSON.stringify(down.map(d => d.url).sort());\nconst lastKey = staticData.lastDownSet || '';\nconst changed = currentKey !== lastKey;\nstaticData.lastDownSet = currentKey;\n\nconst wasDown = lastKey !== '[]' && lastKey !== '';\nconst nowDown = down.length > 0;\n\nreturn [{ json: { down, changed, nowDown, wasDown, count: down.length } }];\n"
+        }
+      },
+      {
+        "id": "4d919a80-8cdc-42fb-baf2-e2817c1ad1ce",
+        "name": "State Changed?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.2,
+        "position": [
+          640,
+          300
+        ],
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict"
+            },
+            "conditions": [
+              {
+                "id": "4be98a39-0c5a-44b9-bc23-5d00d2f5b652",
+                "leftValue": "={{ $json.changed }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          }
+        }
+      },
+      {
+        "id": "99d89601-03f4-43e1-8cb7-ceee67cab48a",
+        "name": "Services Down?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.2,
+        "position": [
+          860,
+          200
+        ],
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict"
+            },
+            "conditions": [
+              {
+                "id": "09e44d27-a8c5-49ae-a5d9-6cd769c29e64",
+                "leftValue": "={{ $json.nowDown }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          }
+        }
+      },
+      {
+        "id": "2574e3a5-14ad-45b5-9acc-5c9f9db8f860",
+        "name": "Alert: Down",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1080,
+          100
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://tg-notify:8080/send",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "options": {
+            "response": {
+              "response": {
+                "responseFormat": "json"
+              }
+            }
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "{\"level\": \"error\", \"title\": \"Service Down\", \"message\": \"={{ $json.down.map(d => d.url.replace('https://','') + ' (' + d.status + ')').join('\\\\n') }}\"}",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "httpHeaderAuth"
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "WLERegIj33Xn9v90",
+            "name": "tg-notify API"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "id": "ed216769-a964-4ce8-9e5c-814599a62008",
+        "name": "Alert: Recovered",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1080,
+          340
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://tg-notify:8080/send",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "options": {
+            "response": {
+              "response": {
+                "responseFormat": "json"
+              }
+            }
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "{\"level\": \"success\", \"title\": \"Services Recovered\", \"message\": \"All monitored services are back online.\"}",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "httpHeaderAuth"
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "WLERegIj33Xn9v90",
+            "name": "tg-notify API"
+          }
+        },
+        "onError": "continueErrorOutput"
+      }
+    ],
+    "connections": {
+      "Every 5 min": {
+        "main": [
+          [
+            {
+              "node": "Check Services",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Services": {
+        "main": [
+          [
+            {
+              "node": "State Changed?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "State Changed?": {
+        "main": [
+          [
+            {
+              "node": "Services Down?",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          []
+        ]
+      },
+      "Services Down?": {
+        "main": [
+          [
+            {
+              "node": "Alert: Down",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Alert: Recovered",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "authors": "Loukas Vidalis",
+    "name": null,
+    "description": null,
+    "autosaved": false,
+    "workflowPublishHistory": [
+      {
+        "createdAt": "2026-05-09T15:35:08.710Z",
+        "id": 31,
+        "workflowId": "8rhIO2qQrikEtSRC",
+        "versionId": "9787b0a0-b2d0-40ae-8c78-f492fdbe3a93",
+        "event": "activated",
+        "userId": "c2419657-c13d-4a83-adc7-689f6c3d839d"
+      }
+    ]
+  }
+}

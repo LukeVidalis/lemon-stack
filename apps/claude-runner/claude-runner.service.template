@@ -1,0 +1,17 @@
+[Unit]
+Description=Unified claude/copilot runner (plane-claude, plane-copilot, scheduled handlers)
+After=network.target
+
+[Service]
+Type=simple
+User={{ADMIN_USERNAME}}
+WorkingDirectory={{USER_HOME}}/claude-runner
+EnvironmentFile=-{{USER_HOME}}/claude-runner/secrets.env
+ExecStart=/usr/bin/python3 {{USER_HOME}}/claude-runner/runner.py
+Restart=always
+RestartSec=5
+Environment=PORT=9879
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+[Install]
+WantedBy=multi-user.target

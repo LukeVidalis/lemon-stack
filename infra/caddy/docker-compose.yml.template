@@ -1,0 +1,19 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./snippets:/etc/caddy/snippets:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+      loki.project: caddy
+      loki.environment: production
+
+volumes:
+  caddy-data:
+  caddy-config:
