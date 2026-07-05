@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# lemon-stack guided restore — companion to backup.sh.
+# Restores to a fresh staging directory by default; anything destructive
+# requires a typed confirmation. Full DR runbook: docs/backup-restore.md.
+set -euo pipefail
+
+RESTIC_ENV="${RESTIC_ENV:-$HOME/.restic-env}"
+STAGING_ROOT="${STAGING_ROOT:-$HOME/restore-staging}"
+PG_CONTAINER="${PG_CONTAINER:-postgres-shared}"
+
+usage() {
+    cat <<'EOF'
+Usage:
+  restore.sh list                                    show restic snapshots
+  restore.sh files <snapshot|latest> <path> [--target DIR]
+                                                     restore a file/dir to staging
+  restore.sh db <name> [--snapshot ID] [--in-place]  restore a postgres-shared DB
+                                                     (default: scratch <name>_restoretest)
+  restore.sh openbao [--snapshot ID]                 stage Raft snapshot + print steps
+EOF
+}
+
+confirm() {
+    local answer
+    read -r -p "$1 Type 'yes' to continue: " answer
+    [[ "$answer" == "yes" ]]
+}
+
+stage_dir() {
+    local d
+    d="$STAGING_ROOT/$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$d"
+    echo "$d"
+}
+
+if [[ ! -f "$RESTIC_ENV" ]]; then
+    echo "FATAL: $RESTIC_ENV not found — is the backup component installed?" >&2
+    exit 1
+fi
+# shellcheck disable=SC1090
+source "$RESTIC_ENV"
+
+cmd="${1:-}"
+[[ -n "$cmd" ]] && shift || true
+
+case "$cmd" in
+list)
+    restic snapshots
+    ;;
+
+files)
+    snap="${1:?usage: restore.sh files <snapshot|latest> <path>}"
+    path="${2:?usage: restore.sh files <snapshot|latest> <path>}"
+    shift 2
+    target=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --target) target="$2"; shift 2 ;;
+            *) echo "unknown flag: $1" >&2; exit 2 ;;
+        esac
+    done
+    [[ -n "$target" ]] || target=$(stage_dir)
+    restic restore "$snap" --target "$target" --include "$path"
+    echo "restored under: $target"
+    ;;
+
+db)
+    name="${1:?usage: restore.sh db <name>}"
+    shift
+    snap="latest" in_place=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --snapshot) snap="$2"; shift 2 ;;
+            --in-place) in_place=1; shift ;;
+            *) echo "unknown flag: $1" >&2; exit 2 ;;
+        esac
+    done
+    staging=$(stage_dir)
+    restic restore "$snap" --target "$staging" --include "*/pg-shared-$name.dump"
+    dump=$(find "$staging" -name "pg-shared-$name.dump" | head -1)
+    if [[ -z "$dump" ]]; then
+        echo "no dump for '$name' found in snapshot $snap" >&2
+        exit 1
+    fi
+    if [[ $in_place -eq 1 ]]; then
+        confirm "This OVERWRITES the live database '$name'." || { echo "aborted."; exit 1; }
+        docker exec -i "$PG_CONTAINER" pg_restore -U postgres --clean --if-exists -d "$name" < "$dump"
+        echo "restored '$name' in place from snapshot $snap."
+    else
+        scratch="${name}_restoretest"
+        docker exec "$PG_CONTAINER" psql -U postgres -c "DROP DATABASE IF EXISTS \"$scratch\""
+        docker exec "$PG_CONTAINER" psql -U postgres -c "CREATE DATABASE \"$scratch\""
+        docker exec -i "$PG_CONTAINER" pg_restore -U postgres --no-owner -d "$scratch" < "$dump"
+        echo "restored into scratch database '$scratch' — inspect it, then drop with:"
+        echo "  docker exec $PG_CONTAINER psql -U postgres -c 'DROP DATABASE \"$scratch\"'"
+    fi
+    ;;
+
+openbao)
+    snap="latest"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --snapshot) snap="$2"; shift 2 ;;
+            *) echo "unknown flag: $1" >&2; exit 2 ;;
+        esac
+    done
+    staging=$(stage_dir)
+    restic restore "$snap" --target "$staging" --include "*openbao*"
+    raft=$(find "$staging" -name '*.snap' | sort | tail -1)
+    if [[ -z "$raft" ]]; then
+        echo "no OpenBao raft snapshot (*.snap) found in snapshot $snap" >&2
+        exit 1
+    fi
+    cat <<EOF
+Raft snapshot staged at: $raft
+
+OpenBao restore is intentionally manual (it needs your unseal keys):
+  1. Ensure OpenBao is running and UNSEALED (docker/openbao/unseal.sh).
+  2. bao operator raft snapshot restore -force "$raft"
+     (inside the container: docker exec -i openbao bao operator raft snapshot restore -force /path)
+  3. Unseal again and verify: bao kv list secret/apps/
+See docs/backup-restore.md for the full procedure.
+EOF
+    ;;
+
+*)
+    usage
+    exit 2
+    ;;
+esac
