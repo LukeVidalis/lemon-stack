@@ -107,5 +107,33 @@ Check: `sudo ufw status`
 
 ## Docker Port Binding Policy
 
-All containers bind to `127.0.0.1` only — not directly reachable from the network. This prevents Docker from bypassing UFW's iptables rules. Caddy (port 80) is the sole entry point, fronted by Cloudflare Tunnel for TLS.
+All containers bind to `127.0.0.1` only — not directly reachable from the network. This prevents Docker from bypassing UFW's iptables rules. Caddy (port 80) is the sole entry point, fronted by Cloudflare Tunnel for TLS. **Exception:** `wg-easy` publishes `51820/udp` on `0.0.0.0` (WireGuard needs to be reachable directly, can't go through Caddy) — this is the only container allowed to bind non-loopback, and it has an explicit UFW allow rule.
+
+## Remote Access VPNs (WireGuard + Twingate)
+
+Two independent remote-access paths exist, both undocumented until 2026-07-17:
+
+### WireGuard (`wg-easy`)
+
+- **Compose:** `~/docker/wireguard/`, container `wg-easy` (`ghcr.io/wg-easy/wg-easy`)
+- **Admin UI:** `127.0.0.1:51821` (HTTP, loopback only — reach it via an existing SSH/tunnel session, not directly)
+- **VPN port:** `51820/udp`, published on `0.0.0.0` + explicit UFW allow rule (`# WireGuard VPN`)
+- **Mode:** full-tunnel (`WG_ALLOWED_IPS=0.0.0.0/0`), client subnet `10.8.0.x`, public endpoint is the server's public IP (`WG_HOST`)
+- **Client config generation:** only possible from the admin UI, which is loopback-only — chicken-and-egg if you don't already have a tunnel up. Generate new peer configs while already connected (e.g. from a phone that's already a peer), not cold from a brand-new device.
+
+### Twingate
+
+- **Container:** `twingate-icy-wasp` (`twingate/connector:1`), network name `lemongate`
+- Zero-trust connector — device enrollment/resource policy is managed entirely in the Twingate cloud admin console, not on this host. No local peer config needed; client just signs into the account and the connector brokers access to resources on `lemongate`.
+- Simpler to bootstrap on a new device than WireGuard (no chicken-and-egg loopback-admin-UI problem).
+
+### Gotcha: phone hotspot tethering does NOT extend the phone's VPN to tethered devices
+
+Android and iOS both route hotspot/tethered clients' traffic out the raw cellular interface, bypassing whatever VPN (WireGuard, Twingate, anything) is active on the phone itself. A laptop tethered to a phone's hotspot needs **its own independent WireGuard or Twingate client** — it does not inherit the phone's tunnel. Symptom: phone's own SSH/VPN session works fine, but a laptop tethered to that same phone times out reaching `{{SERVER_IP}}` until the laptop runs its own VPN client.
+
+### Gotcha: subnet overlap breaks Twingate (and any split-tunnel VPN) intermittently
+
+lemon-server's LAN is `192.168.1.0/24` — one of the most common default consumer-router ranges. If a client's *local* WiFi network also hands out `192.168.1.x` (home routers, cafes, friends' houses all commonly default to this), the local on-link route can shadow the VPN's route to the same range, so traffic destined for `{{SERVER_IP}}` never reaches the tunnel and just times out. This produces exactly the "works on some networks, not others, and only reliably works over phone hotspot" symptom (phone hotspots typically hand out a different range like `192.168.43.x` or `172.20.10.x`, avoiding the collision).
+**Diagnostic:** on the affected client, check the local WiFi adapter's IP (`ip addr` / `ifconfig` / `ipconfig`) when it's failing — if it's `192.168.1.x`, that's the overlap. **Real fix** would be moving lemon-server's LAN off `192.168.1.0/24`, but that's a disruptive host-network change — not done as of this writing, workaround is knowing which networks conflict.
 </context>
+
