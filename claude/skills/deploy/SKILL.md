@@ -105,6 +105,13 @@ python3 -c "import json; d=json.load(open('$HOME/deploy/ports.json')); print(jso
 - The `*.{{DOMAIN}}` wildcard is configured — no per-subdomain Cloudflare step. If it doesn't resolve, the problem is the Caddy block or DNS cache, not Cloudflare.
 - For LAN clients, flush Unbound's negative cache: `sudo unbound-control flush_zone {{DOMAIN}} && docker exec pihole pihole reloaddns`
 
+**Workflow run fails instantly with `startup_failure` and zero jobs created:**
+- This means GitHub refused to even dispatch the run — the workflow file itself is valid but a job requests permissions the repo's default token can't grant. The reusable deploy workflow's `scan` job declares `permissions: security-events: write`; if the repo's default is read-only, every single run fails this way, forever, with no useful log (`gh run view <id> --log-failed` just says "log not found").
+- Check: `gh api repos/{{GITHUB_ORG}}/<repo>/actions/permissions/workflow -q '.default_workflow_permissions'` — compare against a working repo (should be `write`).
+- Fix: `gh api -X PUT repos/{{GITHUB_ORG}}/<repo>/actions/permissions/workflow -f default_workflow_permissions=write -F can_approve_pull_request_reviews=false`
+- Then `gh run rerun <run_id> --repo {{GITHUB_ORG}}/<repo>` to confirm — it should move to `in_progress` instead of instant `startup_failure`.
+- Seen 2026-08-18: financial-planner had `read` and every push since 2026-07-03 failed silently this way (6+ weeks of dependency bumps never deployed); cashflow had the same misconfig too. New repos scaffolded via `/new-project` should get `write` by default — worth spot-checking after scaffolding.
+
 **Multi-service project not deploying:**
 - Verify `docker-compose.yml` exists at repo root (NOT `Dockerfile`)
 - Check services have `ports:` entries using env var convention: `127.0.0.1:${SVC_PORT:-default}:container_port`
