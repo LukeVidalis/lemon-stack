@@ -108,22 +108,49 @@ self.addEventListener('notificationclick', e => {
 });
 ```
 
-### Subscribe flow (run after user opt-in)
+### Subscribe flow (run after user opt-in) — proxy through your own API
+
+**Don't POST to `https://notify.{{DOMAIN}}/subscribe` from the browser.** That's a
+cross-origin request, and the Authentik SSO cookie for notify isn't sent with it, so it fails
+or redirects. Instead the app's backend proxies to notify's internal API (used by friendly and
+food-planner):
+
 ```js
-const reg = await navigator.serviceWorker.register('/sw.js');
+// Browser: subscribe with the app's own service worker, then hand the subscription to your API.
+const reg = await navigator.serviceWorker.ready;   // race this against a timeout — it never
+                                                   // settles if no SW is registered (dev, failures)
 if ((await Notification.requestPermission()) !== 'granted') return;
-
-const { publicKey } = await fetch('https://notify.{{DOMAIN}}/vapid-public-key').then(r => r.json());
-const sub = await reg.pushManager.subscribe({
-  userVisibleOnly: true,
-  applicationServerKey: urlBase64ToUint8Array(publicKey),
+const { publicKey } = await fetch('/api/notifications/vapid-public-key').then(r => r.json()); // proxied
+const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(publicKey) });
+await fetch('/api/notifications/subscription', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sub.toJSON()),
 });
-await fetch('https://notify.{{DOMAIN}}/subscribe', {
-  method: 'POST', credentials: 'include',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify(sub.toJSON()),
-});
+```
 
+```
+Backend (lemon-internal, X-Internal-Secret):
+  POST   http://notify:8080/api/_internal/subscribe/   {username, uid?, endpoint, keys:{p256dh,auth}, userAgent?}
+  DELETE http://notify:8080/api/_internal/subscribe/   {endpoint}
+  GET    http://notify:8080/vapid-public-key
+```
+
+Gotchas learned the hard way:
+- **Validate the endpoint host** before proxying (allowlist `fcm.googleapis.com`,
+  `*.push.services.mozilla.com`, `*.notify.windows.com`, `web.push.apple.com`, `*.push.apple.com`).
+  Otherwise any signed-in user can make notify POST to arbitrary hosts (blind SSRF).
+- **`POST /api/_internal/notify/` returns 404 when the user has no subscriptions.** Treat
+  that as "0 delivered", not as a failure to retry.
+- Subscriptions are per *browser*, registered to whoever subscribed. On logout, `DELETE` +
+  `sub.unsubscribe()`; when a different user signs in on that browser, re-POST the existing
+  subscription so it moves to them (notify upserts by endpoint).
+- notify fans out to push services one at a time, so a send can be slow. In a
+  BackgroundService, catch `TaskCanceledException` from `HttpClient.Timeout` (it's an
+  `OperationCanceledException`) or it stops the host.
+- If the app is behind forward auth, its service worker must not serve cached HTML while
+  online (it would skip the login redirect and loop), and the manifest link needs
+  `crossorigin="use-credentials"`. Reference implementation: food-planner `client/src/sw.ts`.
+
+```js
 function urlBase64ToUint8Array(b64) {
   const pad = '='.repeat((4 - b64.length % 4) % 4);
   const s = (b64 + pad).replace(/-/g, '+').replace(/_/g, '/');
